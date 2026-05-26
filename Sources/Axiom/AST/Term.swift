@@ -11,10 +11,18 @@
 ///        | Inductive T                  (declare I : T)
 ///        | Constructor c : I            (declare constructor c for I)
 ///        | match t with | cᵢ => uᵢ     (eliminator)
+///        | ?m                              (metavariable / hole)
 /// ```
-public indirect enum Term: Equatable {
+public indirect enum Term: Equatable, Sendable {
 
     case variable(String)
+
+    /// A **metavariable** (hole) to be solved by unification during type inference.
+    ///
+    /// Names stand for unknown terms or types (e.g. *?T*). Unlike ``variable``, a hole is
+    /// not bound by λ or Π; it is solved by extending a metavariable substitution
+    /// *σ(m) = t* when unification succeeds.
+    case hole(String)
 
     /// *Type_i* — predicative universe.
     case universe(Int)
@@ -57,10 +65,13 @@ public indirect enum Term: Equatable {
 
 extension Term {
 
+    /// Term variables (``variable``) free in this term; metavariables (``hole``) are excluded.
     public var freeVariables: Set<String> {
         switch self {
         case .variable(let name):
             return [name]
+        case .hole:
+            return []
         case .universe:
             return []
         case .pi(let param, let type, let body),
@@ -80,10 +91,39 @@ extension Term {
         }
     }
 
+    /// Metavariables (``hole``) free in this term; term variables are excluded.
+    public var freeMetavariables: Set<String> {
+        switch self {
+        case .hole(let name):
+            return [name]
+        case .variable:
+            return []
+        case .universe:
+            return []
+        case .pi(let param, let type, let body),
+             .abstraction(let param, let type, let body):
+            return type.freeMetavariables
+                .union(body.freeMetavariables.subtracting([param]))
+        case .application(let function, let argument):
+            return function.freeMetavariables.union(argument.freeMetavariables)
+        case .inductive(_, let type):
+            return type.freeMetavariables
+        case .constructor(_, _, let type):
+            return type.freeMetavariables
+        case .match(let scrutinee, let cases):
+            return cases.values.reduce(scrutinee.freeMetavariables) { partial, branch in
+                partial.union(branch.freeMetavariables)
+            }
+        }
+    }
+
     public func substituting(name: String, with replacement: Term) -> Term {
         switch self {
         case .variable(let variableName):
             if variableName == name { return replacement }
+            return self
+
+        case .hole:
             return self
 
         case .universe:
@@ -166,7 +206,7 @@ extension Term {
 
     public func reduced() -> Term {
         switch self {
-        case .variable, .universe:
+        case .variable, .universe, .hole:
             return self
 
         case .pi(let param, let type, let body):
@@ -230,7 +270,7 @@ private extension Term {
 
     var allVariableNames: Set<String> {
         switch self {
-        case .variable(let name):
+        case .variable(let name), .hole(let name):
             return [name]
         case .universe:
             return []

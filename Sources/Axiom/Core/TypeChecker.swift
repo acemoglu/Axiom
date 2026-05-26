@@ -1,35 +1,31 @@
 // MARK: - Type errors
 
 /// Failures emitted when a term cannot be assigned a type in CIC.
-public enum TypeError: Error, Equatable {
+public enum TypeError: Error, Equatable, Sendable {
 
     case unboundVariable(String)
 
     case notAFunction(Term, Term)
 
-    /// Definitional inequality modulo β (conversion failure).
     case typeMismatch(expected: Term, actual: Term)
 
-    /// ``match`` scrutinee is not headed by an inductive type.
     case notInductive(Term, Term)
 
-    /// Branches of a ``match`` do not share a common motive type.
     case motiveMismatch(expected: Term, actual: Term)
 
-    /// A ``match`` has no cases.
     case emptyMatch
 }
 
 // MARK: - Type checker
 
-/// Type checker for the **Calculus of Inductive Constructions** (CIC).
-///
-/// Extends dependent typing with inductive declarations, constructors, and elimination
-/// via pattern matching (the **induction principle**).
+/// Type checker for CIC with **metavariable inference** via ``Unifier``.
 public struct TypeChecker {
 
-    /// Infers *Γ ⊢ t : T*.
-    public static func typeCheck(
+    /// Metavariable solutions accumulated during checking (*σ*).
+    public var metavariables: [String: Term] = [:]
+
+    /// Infers *Γ ⊢ t : T*, solving holes through unification.
+    public mutating func typeCheck(
         term: Term,
         environment: [String: Term] = [:]
     ) throws -> Term {
@@ -38,7 +34,13 @@ public struct TypeChecker {
             guard let type = environment[name] else {
                 throw TypeError.unboundVariable(name)
             }
-            return type
+            return instantiateHoles(in: type)
+
+        case .hole(let name):
+            if let solution = metavariables[name] {
+                return instantiateHoles(in: solution)
+            }
+            return .hole(name)
 
         case .universe(let level):
             return .universe(level + 1)
@@ -64,15 +66,15 @@ public struct TypeChecker {
 
         case .application(let function, let argument):
             let functionType = try typeCheck(term: function, environment: environment)
-            let reducedFunctionType = functionType.reduced()
+            let reducedFunctionType = instantiateHoles(in: functionType).reduced()
             guard case .pi(let param, let domain, let codomain) = reducedFunctionType else {
                 throw TypeError.notAFunction(function, functionType)
             }
             let argumentType = try typeCheck(term: argument, environment: environment)
-            guard domain.reduced() == argumentType.reduced() else {
-                throw TypeError.typeMismatch(expected: domain, actual: argumentType)
-            }
-            return codomain.substituting(name: param, with: argument).reduced()
+            try ensureConvertible(expected: domain, actual: argumentType)
+            return instantiateHoles(
+                in: codomain.substituting(name: param, with: argument).reduced()
+            )
 
         case .inductive(_, let sort):
             let sortType = try typeCheck(term: sort, environment: environment)
@@ -97,21 +99,99 @@ public struct TypeChecker {
             for branch in cases.values {
                 let branchType = try typeCheck(term: branch, environment: environment)
                 if let existing = motive {
-                    guard existing.reduced() == branchType.reduced() else {
-                        throw TypeError.motiveMismatch(expected: existing, actual: branchType)
-                    }
+                    try ensureConvertible(expected: existing, actual: branchType)
                 } else {
                     motive = branchType
                 }
             }
-            return motive!
+            return instantiateHoles(in: motive!)
         }
     }
 
-    /// Recognizes types headed by ``inductive`` (including constructor types whose ``type``
-    /// field is the inductive family).
-    private static func inductiveHead(of type: Term) -> String? {
-        let normalized = type.reduced()
+    /// Convenience: type-check with a fresh checker and return an instantiated type.
+    public static func typeCheck(
+        term: Term,
+        environment: [String: Term] = [:]
+    ) throws -> Term {
+        var checker = TypeChecker()
+        let raw = try checker.typeCheck(term: term, environment: environment)
+        return checker.instantiateHoles(in: raw)
+    }
+
+    /// Replaces solved ``Term/hole`` nodes with their values in ``metavariables``.
+    public func instantiateHoles(in term: Term) -> Term {
+        var visited: Set<String> = []
+        return instantiateHoles(in: term, visited: &visited)
+    }
+
+    private func instantiateHoles(in term: Term, visited: inout Set<String>) -> Term {
+        switch term {
+        case .hole(let name):
+            if visited.contains(name) {
+                return term
+            }
+            guard let solution = metavariables[name] else {
+                return term
+            }
+            visited.insert(name)
+            defer { visited.remove(name) }
+            return instantiateHoles(in: solution, visited: &visited)
+
+        case .variable, .universe:
+            return term
+
+        case .pi(let param, let type, let body):
+            return .pi(
+                param: param,
+                type: instantiateHoles(in: type, visited: &visited),
+                body: instantiateHoles(in: body, visited: &visited)
+            )
+
+        case .abstraction(let param, let type, let body):
+            return .abstraction(
+                param: param,
+                type: instantiateHoles(in: type, visited: &visited),
+                body: instantiateHoles(in: body, visited: &visited)
+            )
+
+        case .application(let function, let argument):
+            return .application(
+                function: instantiateHoles(in: function, visited: &visited),
+                argument: instantiateHoles(in: argument, visited: &visited)
+            )
+
+        case .inductive(let name, let type):
+            return .inductive(name: name, type: instantiateHoles(in: type, visited: &visited))
+
+        case .constructor(let name, let inductiveName, let type):
+            return .constructor(
+                name: name,
+                inductiveName: inductiveName,
+                type: instantiateHoles(in: type, visited: &visited)
+            )
+
+        case .match(let scrutinee, let cases):
+            return .match(
+                scrutinee: instantiateHoles(in: scrutinee, visited: &visited),
+                cases: cases.mapValues { instantiateHoles(in: $0, visited: &visited) }
+            )
+        }
+    }
+
+    private mutating func ensureConvertible(expected: Term, actual: Term) throws {
+        do {
+            try Unifier.unify(
+                instantiateHoles(in: expected).reduced(),
+                instantiateHoles(in: actual).reduced(),
+                context: &metavariables
+            )
+        } catch is UnificationError {
+            throw TypeError.typeMismatch(expected: expected, actual: actual)
+        }
+    }
+
+    private func inductiveHead(of type: Term) -> String? {
+        let normalized = instantiateHoles(in: type).reduced()
         if case .inductive(let name, _) = normalized {
             return name
         }
