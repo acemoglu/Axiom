@@ -1,34 +1,30 @@
 import XCTest
 @testable import Axiom
 
-/// Verifies β-reduction against **Church encodings** of booleans and conditionals.
-///
-/// Church booleans are pure λ-terms—no native `Bool`—demonstrating that Axiom can
-/// evaluate logical branching entirely within the calculus. Typed abstractions use a
-/// shared dummy type ``branchType`` so fixtures satisfy the STLC AST shape.
+/// Verifies β-reduction against Church encodings in the dependently typed AST.
 final class TermReductionTests: XCTestCase {
 
     private let a = Term.variable("a")
     private let b = Term.variable("b")
 
-    /// Stand-in type for Church-encoded branch parameters (*λx:Bool. …*).
-    private let branchType = Type.base("Bool")
+    /// Sort for Church-encoded branch parameters (*Type₀*).
+    private let branchType = Term.universe(0)
 
-    /// Church true: *λx:Bool. λy:Bool. x*.
+    /// Church true: *λx. λy. x*.
     private lazy var trueTerm = Term.abstraction(
         param: "x",
         type: branchType,
         body: .abstraction(param: "y", type: branchType, body: .variable("x"))
     )
 
-    /// Church false: *λx:Bool. λy:Bool. y*.
+    /// Church false: *λx. λy. y*.
     private lazy var falseTerm = Term.abstraction(
         param: "x",
         type: branchType,
         body: .abstraction(param: "y", type: branchType, body: .variable("y"))
     )
 
-    /// Church conditional: *λc. λt. λe. c t e* (each binder typed with ``branchType``).
+    /// Church conditional: *λc. λt. λe. c t e*.
     private lazy var ifTerm = Term.abstraction(
         param: "c",
         type: branchType,
@@ -64,7 +60,6 @@ final class TermReductionTests: XCTestCase {
         XCTAssertEqual(whenFalse, b, "if false a b should reduce to b")
     }
 
-    /// Curried application: *(f x)* as a left-associated spine node.
     private func apply(_ function: Term, _ argument: Term) -> Term {
         .application(function: function, argument: argument)
     }

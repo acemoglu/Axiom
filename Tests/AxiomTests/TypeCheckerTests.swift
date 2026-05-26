@@ -1,16 +1,13 @@
 import XCTest
 @testable import Axiom
 
-/// Verifies the STLC type checker against Curry–Howard readings of simple proofs.
-///
-/// Each test encodes a proposition as a type and a proof term whose typing judgment
-/// *Γ ⊢ t : T* must hold (or fail predictably) under ``TypeChecker``.
+/// Verifies dependent typing and β-conversion in ``TypeChecker``.
 final class TypeCheckerTests: XCTestCase {
 
-    private let typeA = Type.base("A")
-    private let typeB = Type.base("B")
+    private let typeA = Term.universe(0)
+    private let typeB = Term.universe(1)
 
-    /// *λx:A. x* witnesses *A → A* (identity / reflexivity of implication on *A*).
+    /// *λx:Type₀. x* has type *Π(x:Type₀). Type₀*.
     func testIdentityProof() throws {
         let id = Term.abstraction(
             param: "x",
@@ -18,13 +15,13 @@ final class TypeCheckerTests: XCTestCase {
             body: .variable("x")
         )
         let inferred = try TypeChecker.typeCheck(term: id)
-        XCTAssertEqual(inferred, .arrow(from: typeA, to: typeA))
+        XCTAssertEqual(inferred, Term.pi(param: "x", type: typeA, body: typeA))
     }
 
-    /// Modus ponens: from *f : A → B* and *x : A*, conclude *f x : B*.
+    /// Modus ponens with a non-dependent Π-type: *Π(x:A). B* and *x : A* yield *B*.
     func testModusPonensProof() throws {
-        let environment: [String: Type] = [
-            "f": .arrow(from: typeA, to: typeB),
+        let environment: [String: Term] = [
+            "f": Term.pi(param: "x", type: typeA, body: typeB),
             "x": typeA,
         ]
         let app = Term.application(
@@ -35,10 +32,10 @@ final class TypeCheckerTests: XCTestCase {
         XCTAssertEqual(inferred, typeB)
     }
 
-    /// Applying *f : A → B* to *y : B* must fail: argument type does not match domain *A*.
+    /// Domain *A* and argument *B* are not β-convertible.
     func testTypeMismatchError() {
-        let environment: [String: Type] = [
-            "f": .arrow(from: typeA, to: typeB),
+        let environment: [String: Term] = [
+            "f": Term.pi(param: "x", type: typeA, body: typeB),
             "y": typeB,
         ]
         let app = Term.application(
@@ -53,7 +50,6 @@ final class TypeCheckerTests: XCTestCase {
         }
     }
 
-    /// A free variable with empty Γ is not typable.
     func testUnboundVariableError() {
         XCTAssertThrowsError(try TypeChecker.typeCheck(term: .variable("z"))) { error in
             XCTAssertEqual(error as? TypeError, .unboundVariable("z"))
