@@ -7,6 +7,8 @@ public enum TypeError: Error, Equatable, Sendable {
 
     case notAFunction(Term, Term)
 
+    case expectedUniverse(Term, Term)
+
     case typeMismatch(expected: Term, actual: Term)
 
     case notInductive(Term, Term)
@@ -14,6 +16,10 @@ public enum TypeError: Error, Equatable, Sendable {
     case motiveMismatch(expected: Term, actual: Term)
 
     case emptyMatch
+
+    case declarationUsedAsExpression(Term)
+
+    case invalidConstructorTarget(expected: String, actual: Term)
 }
 
 // MARK: - Type checker
@@ -23,18 +29,38 @@ public struct TypeChecker {
 
     /// Metavariable solutions accumulated during checking (*σ*).
     public var metavariables: [String: Term] = [:]
+    public var declarations: DeclarationEnvironment
+    public let conversion: Conversion
+
+    public init(
+        declarations: DeclarationEnvironment = DeclarationEnvironment(),
+        conversion: Conversion = Conversion()
+    ) {
+        self.declarations = declarations
+        self.conversion = conversion
+    }
 
     /// Infers *Γ ⊢ t : T*, solving holes through unification.
     public mutating func typeCheck(
         term: Term,
         environment: [String: Term] = [:]
     ) throws -> Term {
+        if term.role == .declaration {
+            return try typeCheckDeclaration(term: term, environment: environment)
+        }
+
         switch term {
         case .variable(let name):
-            guard let type = environment[name] else {
-                throw TypeError.unboundVariable(name)
+            if let localType = environment[name] {
+                return instantiateHoles(in: localType)
             }
-            return instantiateHoles(in: type)
+            if let declaration = declarations.lookup(name) {
+                return instantiateHoles(in: declaration.type)
+            }
+            if let declaration = declarations.lookup(resolvingQualifiedName: name) {
+                return instantiateHoles(in: declaration.type)
+            }
+            throw TypeError.unboundVariable(name)
 
         case .hole(let name):
             if let solution = metavariables[name] {
@@ -47,15 +73,11 @@ public struct TypeChecker {
 
         case .pi(let param, let domain, let codomain):
             let domainType = try typeCheck(term: domain, environment: environment)
-            guard case .universe(let i) = domainType else {
-                throw TypeError.notAFunction(domain, domainType)
-            }
+            let i = try expectUniverseLevel(of: domain, inferredType: domainType)
             var extended = environment
             extended[param] = domain
             let codomainType = try typeCheck(term: codomain, environment: extended)
-            guard case .universe(let j) = codomainType else {
-                throw TypeError.notAFunction(codomain, codomainType)
-            }
+            let j = try expectUniverseLevel(of: codomain, inferredType: codomainType)
             return .universe(max(i, j))
 
         case .abstraction(let param, let paramType, let body):
@@ -65,27 +87,19 @@ public struct TypeChecker {
             return .pi(param: param, type: paramType, body: bodyType)
 
         case .application(let function, let argument):
+            if function.role == .declaration || argument.role == .declaration {
+                throw TypeError.declarationUsedAsExpression(term)
+            }
             let functionType = try typeCheck(term: function, environment: environment)
-            let reducedFunctionType = instantiateHoles(in: functionType).reduced()
+            let reducedFunctionType = conversion.normalize(instantiateHoles(in: functionType))
             guard case .pi(let param, let domain, let codomain) = reducedFunctionType else {
                 throw TypeError.notAFunction(function, functionType)
             }
             let argumentType = try typeCheck(term: argument, environment: environment)
             try ensureConvertible(expected: domain, actual: argumentType)
             return instantiateHoles(
-                in: codomain.substituting(name: param, with: argument).reduced()
+                in: conversion.normalize(codomain.substituting(name: param, with: argument))
             )
-
-        case .inductive(_, let sort):
-            let sortType = try typeCheck(term: sort, environment: environment)
-            guard case .universe = sortType else {
-                throw TypeError.notAFunction(sort, sortType)
-            }
-            return sort
-
-        case .constructor(_, _, let type):
-            _ = try typeCheck(term: type, environment: environment)
-            return type
 
         case .match(let scrutinee, let cases):
             guard !cases.isEmpty else {
@@ -105,15 +119,19 @@ public struct TypeChecker {
                 }
             }
             return instantiateHoles(in: motive!)
+
+        case .inductive, .constructor:
+            throw TypeError.declarationUsedAsExpression(term)
         }
     }
 
     /// Convenience: type-check with a fresh checker and return an instantiated type.
     public static func typeCheck(
         term: Term,
+        declarations: DeclarationEnvironment = DeclarationEnvironment(),
         environment: [String: Term] = [:]
     ) throws -> Term {
-        var checker = TypeChecker()
+        var checker = TypeChecker(declarations: declarations)
         let raw = try checker.typeCheck(term: term, environment: environment)
         return checker.instantiateHoles(in: raw)
     }
@@ -179,10 +197,15 @@ public struct TypeChecker {
     }
 
     private mutating func ensureConvertible(expected: Term, actual: Term) throws {
+        let normalizedExpected = conversion.normalize(instantiateHoles(in: expected))
+        let normalizedActual = conversion.normalize(instantiateHoles(in: actual))
+        if conversion.areDefinitionallyEqual(normalizedExpected, normalizedActual) {
+            return
+        }
         do {
             try Unifier.unify(
-                instantiateHoles(in: expected).reduced(),
-                instantiateHoles(in: actual).reduced(),
+                normalizedExpected,
+                normalizedActual,
                 context: &metavariables
             )
         } catch is UnificationError {
@@ -190,8 +213,15 @@ public struct TypeChecker {
         }
     }
 
+    private func expectUniverseLevel(of term: Term, inferredType: Term) throws -> Int {
+        guard case .universe(let level) = inferredType else {
+            throw TypeError.expectedUniverse(term, inferredType)
+        }
+        return level
+    }
+
     private func inductiveHead(of type: Term) -> String? {
-        let normalized = instantiateHoles(in: type).reduced()
+        let normalized = conversion.normalize(instantiateHoles(in: type))
         if case .inductive(let name, _) = normalized {
             return name
         }
@@ -202,5 +232,50 @@ public struct TypeChecker {
             return inductiveHead(of: body)
         }
         return nil
+    }
+
+    private mutating func typeCheckDeclaration(
+        term: Term,
+        environment: [String: Term]
+    ) throws -> Term {
+        switch term {
+        case .inductive(let name, let sort):
+            let sortType = try typeCheck(term: sort, environment: environment)
+            _ = try expectUniverseLevel(of: sort, inferredType: sortType)
+            let declaration = Declaration(name: name, kind: .inductive, type: sort)
+            if declarations.lookup(name) == nil {
+                try? declarations.add(declaration)
+            }
+            return sort
+
+        case .constructor(let constructorName, let inductiveName, let type):
+            _ = try typeCheck(term: type, environment: environment)
+            guard constructorReturnsInductive(type, inductiveName: inductiveName) else {
+                throw TypeError.invalidConstructorTarget(expected: inductiveName, actual: type)
+            }
+            let declaration = Declaration(
+                name: constructorName,
+                kind: .constructor,
+                type: type
+            )
+            if declarations.lookup(constructorName) == nil {
+                try? declarations.add(declaration)
+            }
+            return type
+
+        default:
+            return try typeCheck(term: term, environment: environment)
+        }
+    }
+
+    private func constructorReturnsInductive(_ type: Term, inductiveName: String) -> Bool {
+        var current = type
+        while case .pi(_, _, let body) = current {
+            current = body
+        }
+        if case .inductive(let name, _) = current {
+            return name == inductiveName
+        }
+        return false
     }
 }

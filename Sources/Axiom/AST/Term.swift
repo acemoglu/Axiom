@@ -61,9 +61,25 @@ public indirect enum Term: Equatable, Sendable {
     case match(scrutinee: Term, cases: [String: Term])
 }
 
+/// High-level role classification used by the kernel boundary.
+public enum TermRole: Equatable, Sendable {
+    case expression
+    case declaration
+}
+
 // MARK: - Free variables and capture-avoiding substitution
 
 extension Term {
+
+    /// Distinguishes declaration-like nodes from executable expressions.
+    public var role: TermRole {
+        switch self {
+        case .inductive, .constructor:
+            return .declaration
+        default:
+            return .expression
+        }
+    }
 
     /// Term variables (``variable``) free in this term; metavariables (``hole``) are excluded.
     public var freeVariables: Set<String> {

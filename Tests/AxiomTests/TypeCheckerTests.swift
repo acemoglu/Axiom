@@ -55,4 +55,26 @@ final class TypeCheckerTests: XCTestCase {
             XCTAssertEqual(error as? TypeError, .unboundVariable("z"))
         }
     }
+
+    func testPiDomainMustTypeToUniverse() {
+        let invalidPi = Term.pi(
+            param: "x",
+            type: .abstraction(param: "y", type: .universe(0), body: .variable("y")),
+            body: .universe(0)
+        )
+        XCTAssertThrowsError(try TypeChecker.typeCheck(term: invalidPi)) { error in
+            guard case .expectedUniverse = error as? TypeError else {
+                return XCTFail("Expected expectedUniverse, got \(error)")
+            }
+        }
+    }
+
+    func testGlobalDeclarationLookup() throws {
+        var declarations = DeclarationEnvironment()
+        try declarations.add(
+            Declaration(name: "A", kind: .constant, type: .universe(0), modulePath: ["Core"])
+        )
+        let inferred = try TypeChecker.typeCheck(term: .variable("Core.A"), declarations: declarations)
+        XCTAssertEqual(inferred, .universe(0))
+    }
 }
