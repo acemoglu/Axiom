@@ -26,10 +26,11 @@ public struct Unifier {
     public static func unify(
         _ t1: Term,
         _ t2: Term,
+        conversion: Conversion = Conversion(),
         context: inout [String: Term]
     ) throws {
-        let left = normalize(applyMetas(t1, context: context), context: context).reduced()
-        let right = normalize(applyMetas(t2, context: context), context: context).reduced()
+        let left = conversion.normalize(normalize(applyMetas(t1, context: context), context: context))
+        let right = conversion.normalize(normalize(applyMetas(t2, context: context), context: context))
         try unifyNormalized(left, right, context: &context)
     }
 
