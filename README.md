@@ -64,17 +64,19 @@ let nat = Term.inductive(name: "Nat", type: .universe(0))
 // zero : Nat
 let zero = Term.constructor(name: "zero", inductiveName: "Nat", type: nat)
 
-// match zero with | zero => a   (constant motive)
-let motive = Term.universe(0)
+// match zero with | zero => a   (constant motive λ _:Nat. a)
+let returnType = Term.universe(0)
+let matchMotive = Term.constantMotive(scrutineeType: nat, returnType: .variable("a"))
 let matchOnZero = Term.match(
     scrutinee: zero,
+    motive: matchMotive,
     cases: ["zero": .variable("a")]
 )
 
 // ⊢ matchOnZero : Type₀  (when a : Type₀)
 let matchType = try TypeChecker.typeCheck(
     term: matchOnZero,
-    environment: ["a": motive]
+    environment: ["a": returnType]
 )
 
 // β-reduction: match zero ...  ⇝  a

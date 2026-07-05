@@ -191,9 +191,10 @@ public struct Unifier {
                 type: applyMetas(type, context: context, visited: &visited)
             )
 
-        case .match(let scrutinee, let cases):
+        case .match(let scrutinee, let motive, let cases):
             return .match(
                 scrutinee: applyMetas(scrutinee, context: context, visited: &visited),
+                motive: applyMetas(motive, context: context, visited: &visited),
                 cases: cases.mapValues { applyMetas($0, context: context, visited: &visited) }
             )
         }
@@ -235,8 +236,10 @@ private extension Term {
             return type.allVariableNames
         case .constructor(_, _, let type):
             return type.allVariableNames
-        case .match(let scrutinee, let cases):
-            return cases.values.reduce(scrutinee.allVariableNames) { partial, branch in
+        case .match(let scrutinee, let motive, let cases):
+            return cases.values.reduce(
+                scrutinee.allVariableNames.union(motive.allVariableNames)
+            ) { partial, branch in
                 partial.union(branch.allVariableNames)
             }
         }

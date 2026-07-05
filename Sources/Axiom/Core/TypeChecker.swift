@@ -32,6 +32,8 @@ public enum TypeError: Error, Equatable, Sendable {
     case matchArityMismatch(constructor: String, expected: Int, actual: Int)
 
     case unresolvedHole(String, in: Term)
+
+    case unsupportedTermination(String)
 }
 
 // MARK: - Type checker
@@ -138,7 +140,7 @@ public struct TypeChecker {
                 )
             )
 
-        case .match(let scrutinee, let cases):
+        case .match(let scrutinee, let motive, let cases):
             guard !cases.isEmpty else {
                 throw TypeError.emptyMatch
             }
@@ -150,10 +152,25 @@ public struct TypeChecker {
             guard let inductiveName = try inductiveHead(of: scrutineeType) else {
                 throw TypeError.notInductive(scrutinee, scrutineeType)
             }
+            let normalizedScrutineeType = try conversion.normalize(
+                instantiateHoles(in: scrutineeType),
+                budget: &reductionBudget,
+                unfolding: transparentDefinitions()
+            )
+            let motiveType = try typeCheck(term: motive, environment: environment)
+            let normalizedMotiveType = try conversion.normalize(
+                instantiateHoles(in: motiveType),
+                budget: &reductionBudget,
+                unfolding: transparentDefinitions()
+            )
+            guard case .pi(let motiveParam, let motiveDomain, let motiveCodomain) = normalizedMotiveType else {
+                throw TypeError.motiveMismatch(expected: normalizedScrutineeType, actual: motiveType)
+            }
+            try ensureConvertible(expected: motiveDomain, actual: normalizedScrutineeType)
+            _ = try expectUniverseLevel(of: motive, inferredType: motiveCodomain)
             for missing in allConstructors(for: inductiveName) where cases[missing] == nil {
                 throw TypeError.missingMatchCase(missing)
             }
-            var motive: Term?
             let constructorNames = cases.keys.sorted()
             for constructorName in constructorNames {
                 guard let branch = cases[constructorName] else { continue }
@@ -169,40 +186,31 @@ public struct TypeChecker {
                         actual: constructor.type
                     )
                 }
-                let branchEnvironment = try environmentForMatchBranch(
+                let expectedBranchType = try expectedMatchBranchType(
                     constructorName: constructorName,
-                    branch: branch,
+                    inductiveName: inductiveName,
                     constructorType: constructor.type,
-                    base: environment
+                    motive: motive,
+                    motiveParam: motiveParam
                 )
-                let branchExpectedType = try motive.map {
-                    try expectedMatchBranchType(
-                        constructorName: constructorName,
-                        constructorType: constructor.type,
-                        branch: branch,
-                        motive: $0
+                if peelPiParams(from: constructor.type).isEmpty {
+                    try checkTermMatchesType(
+                        branch,
+                        expected: expectedBranchType,
+                        environment: environment
                     )
-                }
-                let branchType = try typeCheck(
-                    term: branch,
-                    environment: branchEnvironment,
-                    expectedType: branchExpectedType
-                )
-                let branchMotive = peelPiCodomain(branchType)
-                if let existingMotive = motive {
-                    let expectedBranchType = try expectedMatchBranchType(
-                        constructorName: constructorName,
-                        constructorType: constructor.type,
-                        branch: branch,
-                        motive: existingMotive
+                } else {
+                    let branchType = try typeCheck(
+                        term: branch,
+                        environment: environment,
+                        expectedType: expectedBranchType
                     )
                     try ensureConvertible(expected: expectedBranchType, actual: branchType)
-                    try ensureConvertible(expected: existingMotive, actual: branchMotive)
-                } else {
-                    motive = branchMotive
                 }
             }
-            return instantiateHoles(in: motive!)
+            return instantiateHoles(
+                in: Term.application(function: motive, argument: scrutinee)
+            )
 
         case .inductive, .constructor:
             throw TypeError.declarationUsedAsExpression(term)
@@ -250,6 +258,18 @@ public struct TypeChecker {
         guard let value = declaration.value else {
             try declarations.add(declaration)
             return
+        }
+
+        if declaration.kind == .definition || declaration.kind == .theorem {
+            do {
+                try TerminationChecker().checkDefinition(name: declaration.name, value: value)
+            } catch let TerminationError.recursionNotOnMatch(name) {
+                throw TypeError.unsupportedTermination(name)
+            } catch let TerminationError.recursionNotOnSmallerArgument(name, _) {
+                throw TypeError.unsupportedTermination(name)
+            } catch let TerminationError.unsupportedRecursion(name) {
+                throw TypeError.unsupportedTermination(name)
+            }
         }
 
         let valueType = try typeCheck(
@@ -337,9 +357,10 @@ public struct TypeChecker {
                 type: instantiateHoles(in: type, visited: &visited)
             )
 
-        case .match(let scrutinee, let cases):
+        case .match(let scrutinee, let motive, let cases):
             return .match(
                 scrutinee: instantiateHoles(in: scrutinee, visited: &visited),
+                motive: instantiateHoles(in: motive, visited: &visited),
                 cases: cases.mapValues { instantiateHoles(in: $0, visited: &visited) }
             )
         }
@@ -519,8 +540,10 @@ public struct TypeChecker {
             return unresolvedTermHoles(in: body)
         case .pi(_, let domain, let body):
             return unresolvedTermHoles(in: domain).union(unresolvedTermHoles(in: body))
-        case .match(let scrutinee, let cases):
-            return cases.values.reduce(unresolvedTermHoles(in: scrutinee)) { partial, branch in
+        case .match(let scrutinee, let motive, let cases):
+            return cases.values.reduce(
+                unresolvedTermHoles(in: scrutinee).union(unresolvedTermHoles(in: motive))
+            ) { partial, branch in
                 partial.union(unresolvedTermHoles(in: branch))
             }
         case .inductive(_, let type), .constructor(_, _, let type):
@@ -591,14 +614,6 @@ public struct TypeChecker {
         return type
     }
 
-    private func peelPiCodomain(_ type: Term) -> Term {
-        var current = type
-        while case .pi(_, _, let body) = current {
-            current = body
-        }
-        return current
-    }
-
     private mutating func peelExpectedAbstractionBody(
         _ expected: Term,
         param: String,
@@ -618,16 +633,6 @@ public struct TypeChecker {
         return body
     }
 
-    private func peelAbstractionParams(from branch: Term) -> [(String, Term)] {
-        var params: [(String, Term)] = []
-        var current = branch
-        while case .abstraction(let name, let type, let body) = current {
-            params.append((name, type))
-            current = body
-        }
-        return params
-    }
-
     private func peelPiParams(from type: Term) -> [(String, Term)] {
         var params: [(String, Term)] = []
         var current = type
@@ -638,52 +643,80 @@ public struct TypeChecker {
         return params
     }
 
-    private func payloadParameterTypes(from constructorType: Term) -> [(String, Term)] {
-        peelPiParams(from: constructorType)
+    /// Builds *c x₁ … xₙ* for motive application at a match branch.
+    private func constructorInstance(
+        constructorName: String,
+        inductiveName: String,
+        parameters: [(String, Term)]
+    ) -> Term {
+        if parameters.isEmpty {
+            return .variable(constructorName)
+        }
+        var term = Term.variable(constructorName)
+        for (paramName, _) in parameters {
+            term = .application(function: term, argument: .variable(paramName))
+        }
+        return term
     }
 
-    private mutating func environmentForMatchBranch(
-        constructorName: String,
-        branch: Term,
-        constructorType: Term,
-        base: [String: Term]
-    ) throws -> [String: Term] {
-        let parameterTypes = payloadParameterTypes(from: constructorType)
-        let branchParams = peelAbstractionParams(from: branch)
-        guard parameterTypes.count == branchParams.count else {
-            throw TypeError.matchArityMismatch(
-                constructor: constructorName,
-                expected: parameterTypes.count,
-                actual: branchParams.count
+    /// Applies motive *C* to constructor instance *c x₁ … xₙ*, α-renaming when needed.
+    private func applyMotive(
+        _ motive: Term,
+        motiveParam: String,
+        to instance: Term,
+        constructorParameters: [(String, Term)]
+    ) -> Term {
+        let constructorParamNames = Set(constructorParameters.map(\.0))
+        var workingMotive = motive
+
+        if constructorParamNames.contains(motiveParam),
+           case .abstraction(let param, let paramType, let body) = motive,
+           param == motiveParam {
+            let fresh = freshBinderName(
+                avoiding: constructorParamNames
+                    .union(instance.freeVariables)
+                    .union(motive.freeVariables)
+            )
+            workingMotive = .abstraction(
+                param: fresh,
+                type: paramType,
+                body: body.substituting(name: param, with: .variable(fresh))
             )
         }
-        var environment = base
-        for index in branchParams.indices {
-            environment[branchParams[index].0] = parameterTypes[index].1
+
+        return Term.application(function: workingMotive, argument: instance)
+    }
+
+    private func freshBinderName(avoiding used: Set<String>) -> String {
+        var index = 0
+        while true {
+            let candidate = "$m\(index)"
+            if !used.contains(candidate) { return candidate }
+            index += 1
         }
-        return environment
     }
 
     private mutating func expectedMatchBranchType(
         constructorName: String,
+        inductiveName: String,
         constructorType: Term,
-        branch: Term,
-        motive: Term
+        motive: Term,
+        motiveParam: String
     ) throws -> Term {
-        let parameterTypes = payloadParameterTypes(from: constructorType)
-        let branchParams = peelAbstractionParams(from: branch)
-        guard parameterTypes.count == branchParams.count else {
-            throw TypeError.matchArityMismatch(
-                constructor: constructorName,
-                expected: parameterTypes.count,
-                actual: branchParams.count
-            )
-        }
-        var result = motive
-        for index in stride(from: branchParams.count - 1, through: 0, by: -1) {
-            let binder = branchParams[index].0
-            let domain = parameterTypes[index].1
-            result = .pi(param: binder, type: domain, body: result)
+        let parameters = peelPiParams(from: constructorType)
+        let instance = constructorInstance(
+            constructorName: constructorName,
+            inductiveName: inductiveName,
+            parameters: parameters
+        )
+        var result = applyMotive(
+            motive,
+            motiveParam: motiveParam,
+            to: instance,
+            constructorParameters: parameters
+        )
+        for (param, domain) in parameters.reversed() {
+            result = .pi(param: param, type: domain, body: result)
         }
         return result
     }

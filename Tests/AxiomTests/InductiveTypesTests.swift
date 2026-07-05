@@ -27,13 +27,15 @@ final class InductiveTypesTests: XCTestCase {
     }
 
     func testPatternMatching() throws {
-        let motive = Term.universe(0)
+        let returnType = Term.universe(0)
         let a = Term.variable("a")
+        let motive = Term.constantMotive(scrutineeType: nat, returnType: returnType)
         let matchOnZero = Term.match(
             scrutinee: zero,
+            motive: motive,
             cases: [
                 "zero": a,
-                "succ": Term.abstraction(param: "k", type: nat, body: a),
+                "succ": Term.abstraction(param: "n", type: nat, body: a),
             ]
         )
 
@@ -42,9 +44,11 @@ final class InductiveTypesTests: XCTestCase {
         let inferred = try TypeChecker.typeCheck(
             term: matchOnZero,
             declarations: try natEnvironment(),
-            environment: ["a": motive]
+            environment: ["a": returnType]
         )
-        XCTAssertEqual(try inferred.reduced(), try motive.reduced())
+        XCTAssertTrue(
+            try Conversion().areDefinitionallyEqual(inferred, returnType)
+        )
     }
 
     func testNatAndConstructorsTypecheck() throws {
@@ -57,28 +61,36 @@ final class InductiveTypesTests: XCTestCase {
     }
 
     func testCompleteNatMatch() throws {
-        let motive = Term.universe(0)
+        let returnType = Term.universe(0)
         let a = Term.variable("a")
+        let motive = Term.constantMotive(scrutineeType: nat, returnType: returnType)
         let matchBoth = Term.match(
             scrutinee: .variable("n"),
+            motive: motive,
             cases: [
                 "zero": a,
-                "succ": Term.abstraction(param: "k", type: nat, body: a),
+                "succ": Term.abstraction(param: "n", type: nat, body: a),
             ]
         )
 
         let inferred = try TypeChecker.typeCheck(
             term: matchBoth,
             declarations: try natEnvironment(),
-            environment: ["n": nat, "a": motive]
+            environment: ["n": nat, "a": returnType]
         )
-        XCTAssertEqual(try inferred.reduced(), try motive.reduced())
+        XCTAssertTrue(
+            try Conversion().areDefinitionallyEqual(inferred, returnType)
+        )
     }
 
     func testIncompleteNatMatchRejected() throws {
+        let returnType = Term.universe(0)
+        let a = Term.variable("a")
+        let motive = Term.constantMotive(scrutineeType: nat, returnType: returnType)
         let matchOnlyZero = Term.match(
             scrutinee: .variable("n"),
-            cases: ["zero": Term.variable("a")]
+            motive: motive,
+            cases: ["zero": a]
         )
 
         XCTAssertThrowsError(
@@ -92,12 +104,16 @@ final class InductiveTypesTests: XCTestCase {
         }
     }
 
-    func testMatchArityMismatchRejected() throws {
+    func testMatchBranchTypeMismatchRejected() throws {
+        let returnType = Term.universe(0)
+        let a = Term.variable("a")
+        let motive = Term.constantMotive(scrutineeType: nat, returnType: returnType)
         let matchBadSucc = Term.match(
             scrutinee: .variable("n"),
+            motive: motive,
             cases: [
-                "zero": Term.variable("a"),
-                "succ": Term.variable("a"),
+                "zero": a,
+                "succ": a,
             ]
         )
 
@@ -108,22 +124,22 @@ final class InductiveTypesTests: XCTestCase {
                 environment: ["n": nat, "a": Term.universe(0)]
             )
         ) { error in
-            guard case .matchArityMismatch(let constructor, let expected, let actual) = error as? TypeError else {
-                return XCTFail("Expected matchArityMismatch, got \(error)")
+            guard case .typeMismatch = error as? TypeError else {
+                return XCTFail("Expected typeMismatch, got \(error)")
             }
-            XCTAssertEqual(constructor, "succ")
-            XCTAssertEqual(expected, 1)
-            XCTAssertEqual(actual, 0)
         }
     }
 
     func testUnknownMatchConstructorRejected() throws {
+        let returnType = Term.universe(0)
         let a = Term.variable("a")
+        let motive = Term.constantMotive(scrutineeType: nat, returnType: returnType)
         let matchUnknown = Term.match(
             scrutinee: .variable("n"),
+            motive: motive,
             cases: [
                 "zero": a,
-                "succ": Term.abstraction(param: "k", type: nat, body: a),
+                "succ": Term.abstraction(param: "n", type: nat, body: a),
                 "bogus": a,
             ]
         )
@@ -136,6 +152,101 @@ final class InductiveTypesTests: XCTestCase {
             )
         ) { error in
             XCTAssertEqual(error as? TypeError, .unknownMatchConstructor("bogus"))
+        }
+    }
+
+    func testDependentMatchAppliesMotiveToScrutinee() throws {
+        var env = try natEnvironment()
+        let vecType = Term.pi(param: "n", type: nat, body: Term.universe(0))
+        try env.add(
+            Declaration(
+                name: "Vec",
+                kind: .definition,
+                type: vecType,
+                value: Term.abstraction(param: "_", type: nat, body: Term.universe(0))
+            )
+        )
+
+        let P = Term.abstraction(
+            param: "i",
+            type: nat,
+            body: Term.application(function: .variable("Vec"), argument: .variable("i"))
+        )
+        let succZero = Term.application(
+            function: .variable("succ"),
+            argument: .variable("zero")
+        )
+        let zeroWitness = Term.variable("vz")
+        let succWitness = Term.variable("vs")
+
+        let matchTerm = Term.match(
+            scrutinee: succZero,
+            motive: P,
+            cases: [
+                "zero": zeroWitness,
+                "succ": Term.abstraction(param: "n", type: nat, body: succWitness),
+            ]
+        )
+
+        let vecZero = Term.application(function: .variable("Vec"), argument: .variable("zero"))
+
+        let inferred = try TypeChecker.typeCheck(
+            term: matchTerm,
+            declarations: env,
+            environment: [
+                "zero": nat,
+                "succ": Term.pi(param: "n", type: nat, body: nat),
+                "vz": vecZero,
+                "vs": Term.universe(0),
+            ]
+        )
+
+        let expected = Term.application(function: P, argument: succZero)
+        XCTAssertTrue(try Conversion().areDefinitionallyEqual(inferred, expected))
+    }
+
+    func testDependentMatchRejectsWrongZeroBranch() throws {
+        var env = try natEnvironment()
+        let vecType = Term.pi(param: "n", type: nat, body: Term.universe(0))
+        try env.add(
+            Declaration(
+                name: "Vec",
+                kind: .definition,
+                type: vecType,
+                value: Term.abstraction(param: "_", type: nat, body: Term.universe(0))
+            )
+        )
+
+        let P = Term.abstraction(
+            param: "i",
+            type: nat,
+            body: Term.application(function: .variable("Vec"), argument: .variable("i"))
+        )
+
+        let matchTerm = Term.match(
+            scrutinee: .variable("zero"),
+            motive: P,
+            cases: [
+                "zero": Term.variable("badZero"),
+                "succ": Term.abstraction(param: "n", type: nat, body: Term.variable("vs")),
+            ]
+        )
+
+        XCTAssertThrowsError(
+            try TypeChecker.typeCheck(
+                term: matchTerm,
+                declarations: env,
+                environment: [
+                    "zero": nat,
+                    "succ": Term.pi(param: "n", type: nat, body: nat),
+                    "badZero": nat,
+                    "vs": Term.universe(0),
+                ]
+            )
+        ) { error in
+            guard case .typeMismatch = error as? TypeError else {
+                return XCTFail("Expected typeMismatch, got \(error)")
+            }
         }
     }
 }

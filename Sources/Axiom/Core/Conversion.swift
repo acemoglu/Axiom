@@ -68,9 +68,10 @@ public struct Conversion {
                 )
             }
             return .application(function: reducedFunction, argument: argument)
-        case .match(let scrutinee, let cases):
+        case .match(let scrutinee, let motive, let cases):
             return try .match(
                 scrutinee: weakHeadNormalize(scrutinee, budget: &budget, unfolding: unfolding),
+                motive: motive,
                 cases: cases
             ).reduced(budget: &budget, unfolding: unfolding)
         default:
@@ -106,8 +107,10 @@ public struct Conversion {
                 return ln == rn && compare(lt, rt, mapping: &mapping)
             case (.constructor(let ln, let li, let lt), .constructor(let rn, let ri, let rt)):
                 return ln == rn && li == ri && compare(lt, rt, mapping: &mapping)
-            case (.match(let ls, let lc), .match(let rs, let rc)):
-                guard lc.keys == rc.keys, compare(ls, rs, mapping: &mapping) else { return false }
+            case (.match(let ls, let lm, let lc), .match(let rs, let rm, let rc)):
+                guard lc.keys == rc.keys,
+                      compare(ls, rs, mapping: &mapping),
+                      compare(lm, rm, mapping: &mapping) else { return false }
                 for key in lc.keys {
                     guard let lv = lc[key], let rv = rc[key], compare(lv, rv, mapping: &mapping) else {
                         return false

@@ -89,8 +89,9 @@ public struct PositivityChecker {
         case .pi(_, let domain, let body),
              .abstraction(_, let domain, let body):
             return occurs(inductiveName, in: domain) || occurs(inductiveName, in: body)
-        case .match(let scrutinee, let cases):
+        case .match(let scrutinee, let motive, let cases):
             return occurs(inductiveName, in: scrutinee)
+                || occurs(inductiveName, in: motive)
                 || cases.values.contains { occurs(inductiveName, in: $0) }
         case .hole, .universe:
             return false
@@ -139,8 +140,9 @@ public struct PositivityChecker {
             try rejectForeignHoles(sort, inductiveName: inductiveName)
         case .constructor(_, _, let constructorType):
             try rejectForeignHoles(constructorType, inductiveName: inductiveName)
-        case .match(let scrutinee, let cases):
+        case .match(let scrutinee, let motive, let cases):
             try rejectForeignHoles(scrutinee, inductiveName: inductiveName)
+            try rejectForeignHoles(motive, inductiveName: inductiveName)
             for branch in cases.values {
                 try rejectForeignHoles(branch, inductiveName: inductiveName)
             }

@@ -10,7 +10,7 @@
 /// t, u ::= …                           (variables, Type_i, Π, λ, application)
 ///        | Inductive T                  (declare I : T)
 ///        | Constructor c : I            (declare constructor c for I)
-///        | match t with | cᵢ => uᵢ     (eliminator)
+///        | match t motive C with | cᵢ => uᵢ   (eliminator with motive *C*)
 ///        | ?m                              (metavariable / hole)
 /// ```
 public indirect enum Term: Equatable, Sendable {
@@ -51,14 +51,16 @@ public indirect enum Term: Equatable, Sendable {
 
     /// **Pattern matching** — the elimination rule for inductive types.
     ///
-    /// When the ``scrutinee`` head-normalizes to a ``constructor``, reduction selects the
-    /// branch in ``cases`` keyed by constructor name. For applied constructors
-    /// *(c a)*, the branch term is applied to *a* (unary elimination; zero-arity branches
-    /// are used as-is).
+    /// - ``motive``: the dependent motive *C : I → Type* (or *λ _:I. T* for a constant
+    ///   return type *T*). The match expression has type *C scrutinee*.
+    /// - When the ``scrutinee`` head-normalizes to a ``constructor``, reduction selects the
+    ///   branch in ``cases`` keyed by constructor name. For applied constructors
+    ///   *(c a)*, the branch term is applied to *a* (unary elimination; zero-arity branches
+    ///   are used as-is).
     ///
-    /// This is the computational content of the **induction principle**: each case is a
-    /// motive specialized to one constructor shape.
-    case match(scrutinee: Term, cases: [String: Term])
+    /// Each branch must have type *Π(x₁:A₁). … C (c x₁ … xₙ)* for the corresponding
+    /// constructor *c*.
+    case match(scrutinee: Term, motive: Term, cases: [String: Term])
 }
 
 /// High-level role classification used by the kernel boundary.
@@ -70,6 +72,11 @@ public enum TermRole: Equatable, Sendable {
 // MARK: - Free variables and capture-avoiding substitution
 
 extension Term {
+
+    /// Convenience: *λ _:A. T* — a constant motive for non-dependent elimination.
+    public static func constantMotive(scrutineeType: Term, returnType: Term) -> Term {
+        .abstraction(param: "_", type: scrutineeType, body: returnType)
+    }
 
     /// Distinguishes declaration-like nodes from executable expressions.
     public var role: TermRole {
@@ -100,8 +107,10 @@ extension Term {
             return type.freeVariables
         case .constructor(_, _, let type):
             return type.freeVariables
-        case .match(let scrutinee, let cases):
-            return cases.values.reduce(scrutinee.freeVariables) { partial, branch in
+        case .match(let scrutinee, let motive, let cases):
+            return cases.values.reduce(
+                scrutinee.freeVariables.union(motive.freeVariables)
+            ) { partial, branch in
                 partial.union(branch.freeVariables)
             }
         }
@@ -126,8 +135,10 @@ extension Term {
             return type.freeMetavariables
         case .constructor(_, _, let type):
             return type.freeMetavariables
-        case .match(let scrutinee, let cases):
-            return cases.values.reduce(scrutinee.freeMetavariables) { partial, branch in
+        case .match(let scrutinee, let motive, let cases):
+            return cases.values.reduce(
+                scrutinee.freeMetavariables.union(motive.freeMetavariables)
+            ) { partial, branch in
                 partial.union(branch.freeMetavariables)
             }
         }
@@ -178,9 +189,10 @@ extension Term {
                 type: type.substituting(name: name, with: replacement)
             )
 
-        case .match(let scrutinee, let cases):
+        case .match(let scrutinee, let motive, let cases):
             return .match(
                 scrutinee: scrutinee.substituting(name: name, with: replacement),
+                motive: motive.substituting(name: name, with: replacement),
                 cases: cases.mapValues { $0.substituting(name: name, with: replacement) }
             )
         }
@@ -265,9 +277,10 @@ extension Term {
                 type: try type.reduced(budget: &budget, unfolding: unfolding)
             )
 
-        case .match(let scrutinee, let cases):
+        case .match(let scrutinee, let motive, let cases):
             return try reduceMatch(
                 scrutinee: scrutinee.reduced(budget: &budget, unfolding: unfolding),
+                motive: try motive.reduced(budget: &budget, unfolding: unfolding),
                 cases: try cases.mapValues { try $0.reduced(budget: &budget, unfolding: unfolding) },
                 budget: &budget,
                 unfolding: unfolding
@@ -284,6 +297,7 @@ extension Term {
     /// Eliminates a ``match`` when the scrutinee is headed by a ``constructor``.
     private func reduceMatch(
         scrutinee: Term,
+        motive: Term,
         cases: [String: Term],
         budget: inout ReductionBudget,
         unfolding: [String: Term]
@@ -291,7 +305,7 @@ extension Term {
         switch scrutinee {
         case .constructor(let constructorName, _, _):
             guard let branch = cases[constructorName] else {
-                return .match(scrutinee: scrutinee, cases: cases)
+                return .match(scrutinee: scrutinee, motive: motive, cases: cases)
             }
             return try branch.reduced(budget: &budget, unfolding: unfolding)
 
@@ -299,15 +313,15 @@ extension Term {
             let reducedFunction = try function.reduced(budget: &budget, unfolding: unfolding)
             if case .constructor(let constructorName, _, _) = reducedFunction {
                 guard let branch = cases[constructorName] else {
-                    return .match(scrutinee: scrutinee, cases: cases)
+                    return .match(scrutinee: scrutinee, motive: motive, cases: cases)
                 }
                 return try .application(function: branch, argument: argument)
                     .reduced(budget: &budget, unfolding: unfolding)
             }
-            return .match(scrutinee: scrutinee, cases: cases)
+            return .match(scrutinee: scrutinee, motive: motive, cases: cases)
 
         default:
-            return .match(scrutinee: scrutinee, cases: cases)
+            return .match(scrutinee: scrutinee, motive: motive, cases: cases)
         }
     }
 }
@@ -331,8 +345,10 @@ private extension Term {
             return type.allVariableNames
         case .constructor(_, _, let type):
             return type.allVariableNames
-        case .match(let scrutinee, let cases):
-            return cases.values.reduce(scrutinee.allVariableNames) { partial, branch in
+        case .match(let scrutinee, let motive, let cases):
+            return cases.values.reduce(
+                scrutinee.allVariableNames.union(motive.allVariableNames)
+            ) { partial, branch in
                 partial.union(branch.allVariableNames)
             }
         }
