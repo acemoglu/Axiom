@@ -34,6 +34,16 @@ public enum TypeError: Error, Equatable, Sendable {
     case unresolvedHole(String, in: Term)
 
     case unsupportedTermination(String)
+
+    case unknownInductive(String)
+
+    case inductiveNotClosed(String)
+
+    case inductiveAlreadyClosed(String)
+
+    case impredicativeQuantification(inductive: String, universeLevel: Int, occurrence: Term)
+
+    case invalidInductiveSort(String, Term)
 }
 
 // MARK: - Type checker
@@ -131,7 +141,7 @@ public struct TypeChecker {
                 throw TypeError.notAFunction(function, functionType)
             }
             let argumentType = try typeCheck(term: argument, environment: environment)
-            try ensureConvertible(expected: domain, actual: argumentType)
+            try ensureConvertibleOrInfer(expected: domain, actual: argumentType)
             return instantiateHoles(
                 in: try conversion.normalize(
                     codomain.substituting(name: param, with: argument),
@@ -151,6 +161,9 @@ public struct TypeChecker {
             )
             guard let inductiveName = try inductiveHead(of: scrutineeType) else {
                 throw TypeError.notInductive(scrutinee, scrutineeType)
+            }
+            guard declarations.isInductiveClosed(inductiveName) else {
+                throw TypeError.inductiveNotClosed(inductiveName)
             }
             let normalizedScrutineeType = try conversion.normalize(
                 instantiateHoles(in: scrutineeType),
@@ -205,7 +218,7 @@ public struct TypeChecker {
                         environment: environment,
                         expectedType: expectedBranchType
                     )
-                    try ensureConvertible(expected: expectedBranchType, actual: branchType)
+                    try ensureConvertibleOrInfer(expected: expectedBranchType, actual: branchType)
                 }
             }
             return instantiateHoles(
@@ -237,7 +250,7 @@ public struct TypeChecker {
                     actual: declaration.type
                 )
             }
-            try checkConstructorPositivity(
+            try checkConstructorRegistration(
                 inductiveName: inductiveName,
                 constructorType: declaration.type
             )
@@ -245,7 +258,7 @@ public struct TypeChecker {
         case .axiom:
             _ = try typeCheck(term: declaration.type)
             try rejectUnresolvedTermHoles(in: declaration.type)
-            try declarations.add(declaration)
+            try registerDeclaration(declaration)
             return
 
         default:
@@ -256,7 +269,7 @@ public struct TypeChecker {
         }
 
         guard let value = declaration.value else {
-            try declarations.add(declaration)
+            try registerDeclaration(declaration)
             return
         }
 
@@ -285,17 +298,17 @@ public struct TypeChecker {
             try rejectUnresolvedTermHoles(in: value)
         }
         try ensureConvertible(expected: declaration.type, actual: valueType)
-        try declarations.add(declaration)
+        try registerDeclaration(declaration)
     }
 
-    /// Verifies *⊢ term : expected* by inference followed by conversion/unification.
+    /// Verifies *⊢ term : expected* by inference followed by conversion, unifying holes when needed.
     public mutating func checkTermMatchesType(
         _ term: Term,
         expected: Term,
         environment: [String: Term] = [:]
     ) throws {
         let actual = try typeCheck(term: term, environment: environment)
-        try ensureConvertible(expected: expected, actual: actual)
+        try ensureConvertibleOrInfer(expected: expected, actual: actual)
     }
 
     /// Convenience: type-check with a fresh checker and return an instantiated type.
@@ -370,17 +383,24 @@ public struct TypeChecker {
         }
     }
 
+    /// Definitional equality only — no metavariable solving (trusted checking).
     private mutating func ensureConvertible(expected: Term, actual: Term) throws {
-        let normalizedExpected = try conversion.normalize(
-            instantiateHoles(in: expected),
+        let normalizedExpected = try normalizedForComparison(expected)
+        let normalizedActual = try normalizedForComparison(actual)
+        guard try conversion.areDefinitionallyEqual(
+            normalizedExpected,
+            normalizedActual,
             budget: &reductionBudget,
             unfolding: reductionUnfolding()
-        )
-        let normalizedActual = try conversion.normalize(
-            instantiateHoles(in: actual),
-            budget: &reductionBudget,
-            unfolding: reductionUnfolding()
-        )
+        ) else {
+            throw TypeError.typeMismatch(expected: expected, actual: actual)
+        }
+    }
+
+    /// Conversion first; on failure, solve metavariables via unification (type inference).
+    private mutating func ensureConvertibleOrInfer(expected: Term, actual: Term) throws {
+        let normalizedExpected = try normalizedForComparison(expected)
+        let normalizedActual = try normalizedForComparison(actual)
         if try conversion.areDefinitionallyEqual(
             normalizedExpected,
             normalizedActual,
@@ -399,6 +419,14 @@ public struct TypeChecker {
         } catch is UnificationError {
             throw TypeError.typeMismatch(expected: expected, actual: actual)
         }
+    }
+
+    private mutating func normalizedForComparison(_ term: Term) throws -> Term {
+        try conversion.normalize(
+            instantiateHoles(in: term),
+            budget: &reductionBudget,
+            unfolding: reductionUnfolding()
+        )
     }
 
     private func expectUniverseLevel(of term: Term, inferredType: Term) throws -> Int {
@@ -436,7 +464,7 @@ public struct TypeChecker {
             _ = try expectUniverseLevel(of: sort, inferredType: sortType)
             let declaration = Declaration(name: name, kind: .inductive, type: sort)
             if declarations.lookup(name) == nil {
-                try declarations.add(declaration)
+                try registerDeclaration(declaration)
             }
             return sort
 
@@ -445,14 +473,14 @@ public struct TypeChecker {
             guard constructorReturnsInductive(type, inductiveName: inductiveName) else {
                 throw TypeError.invalidConstructorTarget(expected: inductiveName, actual: type)
             }
-            try checkConstructorPositivity(inductiveName: inductiveName, constructorType: type)
+            try checkConstructorRegistration(inductiveName: inductiveName, constructorType: type)
             let declaration = Declaration(
                 name: constructorName,
                 kind: .constructor,
                 type: type
             )
             if declarations.lookup(constructorName) == nil {
-                try declarations.add(declaration)
+                try registerDeclaration(declaration)
             }
             return type
 
@@ -489,11 +517,49 @@ public struct TypeChecker {
         }
     }
 
-    /// Verifies strict positivity for every constructor of an inductive already in the environment.
+    /// Verifies predicative universe policy for a constructor of an inductive in ``Term/universe`` *i*.
+    public func checkConstructorUniverses(
+        inductiveName: String,
+        constructorType: Term
+    ) throws {
+        let level = try inductiveLevel(for: inductiveName)
+        do {
+            try UniverseChecker().checkConstructorType(
+                constructorType,
+                inductiveName: inductiveName,
+                inductiveLevel: level
+            )
+        } catch let UniversePolicyError.impredicativeQuantification(inductive, universeLevel, occurrence) {
+            throw TypeError.impredicativeQuantification(
+                inductive: inductive,
+                universeLevel: universeLevel,
+                occurrence: occurrence
+            )
+        }
+    }
+
+    private func checkConstructorRegistration(
+        inductiveName: String,
+        constructorType: Term
+    ) throws {
+        try checkConstructorPositivity(inductiveName: inductiveName, constructorType: constructorType)
+        try checkConstructorUniverses(inductiveName: inductiveName, constructorType: constructorType)
+    }
+
+    private func inductiveLevel(for inductiveName: String) throws -> Int {
+        guard let declaration = declarations.lookup(inductiveName),
+              declaration.kind == .inductive else {
+            throw TypeError.unknownInductive(inductiveName)
+        }
+        guard case .universe(let level) = declaration.type else {
+            throw TypeError.invalidInductiveSort(inductiveName, declaration.type)
+        }
+        return level
+    }
+
+    /// Verifies strict positivity and predicative universes for every constructor.
     public func checkInductivePositivity(inductiveName: String) throws {
-        let constructorTypes = declarations.allDeclarations
-            .filter { $0.kind == .constructor && constructorReturnsInductive($0.type, inductiveName: inductiveName) }
-            .map(\.type)
+        let constructorTypes = declarations.constructors(for: inductiveName).map(\.type)
         do {
             try PositivityChecker().check(
                 inductiveName: inductiveName,
@@ -504,9 +570,71 @@ public struct TypeChecker {
         } catch let PositivityError.unresolvedHole(hole, inductive, occurrence) {
             throw TypeError.unresolvedPositivityHole(hole, inductive: inductive, occurrence: occurrence)
         }
+        let level = try inductiveLevel(for: inductiveName)
+        for constructorType in constructorTypes {
+            do {
+                try UniverseChecker().checkConstructorType(
+                    constructorType,
+                    inductiveName: inductiveName,
+                    inductiveLevel: level
+                )
+            } catch let UniversePolicyError.impredicativeQuantification(inductive, universeLevel, occurrence) {
+                throw TypeError.impredicativeQuantification(
+                    inductive: inductive,
+                    universeLevel: universeLevel,
+                    occurrence: occurrence
+                )
+            }
+        }
+    }
+
+    /// Closes an inductive block after all constructors are registered.
+    ///
+    /// Re-validates strict positivity for every constructor, marks the inductive closed,
+    /// and enables ``Term/match`` elimination on that type.
+    public mutating func closeInductive(_ inductiveName: String) throws {
+        do {
+            try declarations.closeInductive(inductiveName)
+        } catch let DeclarationEnvironmentError.unknownInductive(name) {
+            throw TypeError.unknownInductive(name)
+        } catch let DeclarationEnvironmentError.invalidInductiveSort(name, sort) {
+            throw TypeError.invalidInductiveSort(name, sort)
+        } catch let PositivityError.negativeOccurrence(inductive, occurrence) {
+            throw TypeError.nonStrictlyPositive(inductive: inductive, occurrence: occurrence)
+        } catch let PositivityError.unresolvedHole(hole, inductive, occurrence) {
+            throw TypeError.unresolvedPositivityHole(hole, inductive: inductive, occurrence: occurrence)
+        } catch let UniversePolicyError.impredicativeQuantification(inductive, universeLevel, occurrence) {
+            throw TypeError.impredicativeQuantification(
+                inductive: inductive,
+                universeLevel: universeLevel,
+                occurrence: occurrence
+            )
+        }
     }
 
     // MARK: - Declarations and δ-reduction
+
+    private mutating func registerDeclaration(_ declaration: Declaration) throws {
+        do {
+            try declarations.add(declaration)
+        } catch let DeclarationEnvironmentError.inductiveAlreadyClosed(name) {
+            throw TypeError.inductiveAlreadyClosed(name)
+        } catch let DeclarationEnvironmentError.missingInductiveDeclaration(name) {
+            throw TypeError.unknownInductive(name)
+        } catch let DeclarationEnvironmentError.invalidInductiveSort(name, sort) {
+            throw TypeError.invalidInductiveSort(name, sort)
+        } catch let PositivityError.negativeOccurrence(inductive, occurrence) {
+            throw TypeError.nonStrictlyPositive(inductive: inductive, occurrence: occurrence)
+        } catch let PositivityError.unresolvedHole(hole, inductive, occurrence) {
+            throw TypeError.unresolvedPositivityHole(hole, inductive: inductive, occurrence: occurrence)
+        } catch let UniversePolicyError.impredicativeQuantification(inductive, universeLevel, occurrence) {
+            throw TypeError.impredicativeQuantification(
+                inductive: inductive,
+                universeLevel: universeLevel,
+                occurrence: occurrence
+            )
+        }
+    }
 
     private func recursiveCheckEnvironment(for declaration: Declaration) -> [String: Term] {
         switch declaration.kind {
@@ -647,7 +775,7 @@ public struct TypeChecker {
         )
         guard case .pi(_, let domain, let body) = normalized else { return nil }
         do {
-            try ensureConvertible(expected: domain, actual: paramType)
+            try ensureConvertibleOrInfer(expected: domain, actual: paramType)
         } catch {
             return nil
         }

@@ -45,6 +45,7 @@ final class DeclarationTests: XCTestCase {
         var env = DeclarationEnvironment()
         try env.add(Declaration(name: "Nat", kind: .inductive, type: .universe(0)))
         try env.add(Declaration(name: "zero", kind: .constructor, type: nat))
+        try env.closeInductive("Nat")
 
         var checker = TypeChecker(declarations: env)
         try checker.checkDeclaration(

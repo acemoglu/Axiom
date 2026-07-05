@@ -23,6 +23,7 @@ final class InductiveTypesTests: XCTestCase {
                 type: Term.pi(param: "n", type: nat, body: nat)
             )
         )
+        try env.closeInductive("Nat")
         return env
     }
 
@@ -206,7 +207,7 @@ final class InductiveTypesTests: XCTestCase {
     }
 
     func testMultiArgumentMatchReduction() throws {
-        let elem = Term.universe(0)
+        let elem = nat
         let list = Term.inductive(name: "List", type: .universe(0))
         let nilType = list
         let consType = Term.pi(
@@ -219,6 +220,7 @@ final class InductiveTypesTests: XCTestCase {
         try env.add(Declaration(name: "List", kind: .inductive, type: .universe(0)))
         try env.add(Declaration(name: "nil", kind: .constructor, type: nilType))
         try env.add(Declaration(name: "cons", kind: .constructor, type: consType))
+        try env.closeInductive("List")
 
         let head = Term.variable("h")
         let tail = Term.variable("t")
@@ -326,6 +328,80 @@ final class InductiveTypesTests: XCTestCase {
             guard case .typeMismatch = error as? TypeError else {
                 return XCTFail("Expected typeMismatch, got \(error)")
             }
+        }
+    }
+
+    func testCloseInductiveEnablesMatchElimination() throws {
+        let env = try natEnvironment()
+        XCTAssertTrue(env.isInductiveClosed("Nat"))
+
+        let returnType = Term.universe(0)
+        let witness = Term.variable("a")
+        let matchTerm = Term.match(
+            scrutinee: zero,
+            motive: Term.constantMotive(scrutineeType: nat, returnType: returnType),
+            cases: [
+                "zero": witness,
+                "succ": Term.abstraction(param: "n", type: nat, body: witness),
+            ]
+        )
+        XCTAssertNoThrow(
+            try TypeChecker.typeCheck(
+                term: matchTerm,
+                declarations: env,
+                environment: ["a": returnType]
+            )
+        )
+    }
+
+    func testMatchRejectsUnclosedInductive() throws {
+        var env = DeclarationEnvironment()
+        try env.add(Declaration(name: "Nat", kind: .inductive, type: .universe(0)))
+        try env.add(Declaration(name: "zero", kind: .constructor, type: nat))
+
+        let motive = Term.constantMotive(scrutineeType: nat, returnType: .universe(0))
+        let matchTerm = Term.match(
+            scrutinee: zero,
+            motive: motive,
+            cases: ["zero": .universe(0)]
+        )
+
+        XCTAssertThrowsError(
+            try TypeChecker.typeCheck(term: matchTerm, declarations: env)
+        ) { error in
+            XCTAssertEqual(error as? TypeError, .inductiveNotClosed("Nat"))
+        }
+    }
+
+    func testCloseInductiveRejectsUnknownInductive() {
+        var env = DeclarationEnvironment()
+        XCTAssertThrowsError(try env.closeInductive("Missing")) { error in
+            XCTAssertEqual(
+                error as? DeclarationEnvironmentError,
+                .unknownInductive("Missing")
+            )
+        }
+    }
+
+    func testCannotAddConstructorAfterClose() throws {
+        var env = DeclarationEnvironment()
+        try env.add(Declaration(name: "Nat", kind: .inductive, type: .universe(0)))
+        try env.add(Declaration(name: "zero", kind: .constructor, type: nat))
+        try env.closeInductive("Nat")
+
+        XCTAssertThrowsError(
+            try env.add(
+                Declaration(
+                    name: "succ",
+                    kind: .constructor,
+                    type: Term.pi(param: "n", type: nat, body: nat)
+                )
+            )
+        ) { error in
+            XCTAssertEqual(
+                error as? DeclarationEnvironmentError,
+                .inductiveAlreadyClosed("Nat")
+            )
         }
     }
 }

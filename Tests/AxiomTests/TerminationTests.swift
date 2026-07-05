@@ -22,6 +22,7 @@ final class TerminationTests: XCTestCase {
                 type: Term.pi(param: "n", type: nat, body: nat)
             )
         )
+        try env.closeInductive("Nat")
         return env
     }
 
