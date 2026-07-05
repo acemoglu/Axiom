@@ -42,21 +42,21 @@ final class TermReductionTests: XCTestCase {
         )
     )
 
-    func testChurchTrue() {
-        let result = apply(apply(trueTerm, a), b).reduced()
+    func testChurchTrue() throws {
+        let result = try apply(apply(trueTerm, a), b).reduced()
         XCTAssertEqual(result, a)
     }
 
-    func testChurchFalse() {
-        let result = apply(apply(falseTerm, a), b).reduced()
+    func testChurchFalse() throws {
+        let result = try apply(apply(falseTerm, a), b).reduced()
         XCTAssertEqual(result, b)
     }
 
-    func testChurchIfElse() {
-        let whenTrue = apply(apply(apply(ifTerm, trueTerm), a), b).reduced()
+    func testChurchIfElse() throws {
+        let whenTrue = try apply(apply(apply(ifTerm, trueTerm), a), b).reduced()
         XCTAssertEqual(whenTrue, a, "if true a b should reduce to a")
 
-        let whenFalse = apply(apply(apply(ifTerm, falseTerm), a), b).reduced()
+        let whenFalse = try apply(apply(apply(ifTerm, falseTerm), a), b).reduced()
         XCTAssertEqual(whenFalse, b, "if false a b should reduce to b")
     }
 

@@ -3,17 +3,17 @@ import XCTest
 
 final class ConversionTests: XCTestCase {
 
-    func testAlphaEquivalenceForPiTypes() {
+    func testAlphaEquivalenceForPiTypes() throws {
         let left = Term.pi(param: "x", type: .universe(0), body: .variable("x"))
         let right = Term.pi(param: "y", type: .universe(0), body: .variable("y"))
         let conversion = Conversion(strategy: .normalForm)
-        XCTAssertTrue(conversion.areDefinitionallyEqual(left, right))
+        XCTAssertTrue(try conversion.areDefinitionallyEqual(left, right))
     }
 
-    func testBetaReductionEquality() {
+    func testBetaReductionEquality() throws {
         let identity = Term.abstraction(param: "x", type: .universe(0), body: .variable("x"))
         let applied = Term.application(function: identity, argument: .universe(0))
         let conversion = Conversion(strategy: .normalForm)
-        XCTAssertTrue(conversion.areDefinitionallyEqual(applied, .universe(0)))
+        XCTAssertTrue(try conversion.areDefinitionallyEqual(applied, .universe(0)))
     }
 }

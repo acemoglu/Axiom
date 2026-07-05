@@ -24,8 +24,8 @@ final class TypeInferenceTests: XCTestCase {
             environment: ["a": .universe(0)]
         )
 
-        XCTAssertEqual(checker.metavariables["T"]?.reduced(), Term.universe(0))
-        XCTAssertEqual(inferred.reduced(), Term.universe(0))
+        XCTAssertEqual(try checker.metavariables["T"]?.reduced(), Term.universe(0))
+        XCTAssertEqual(try inferred.reduced(), Term.universe(0))
     }
 
     func testOccursCheckFails() {

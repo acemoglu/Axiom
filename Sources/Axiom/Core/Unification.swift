@@ -29,8 +29,15 @@ public struct Unifier {
         conversion: Conversion = Conversion(),
         context: inout [String: Term]
     ) throws {
-        let left = conversion.normalize(normalize(applyMetas(t1, context: context), context: context))
-        let right = conversion.normalize(normalize(applyMetas(t2, context: context), context: context))
+        var budget = ReductionBudget()
+        let left = try conversion.normalize(
+            normalize(applyMetas(t1, context: context), context: context),
+            budget: &budget
+        )
+        let right = try conversion.normalize(
+            normalize(applyMetas(t2, context: context), context: context),
+            budget: &budget
+        )
         try unifyNormalized(left, right, context: &context)
     }
 
@@ -110,11 +117,11 @@ public struct Unifier {
         with term: Term,
         context: inout [String: Term]
     ) throws {
-        let normalizedTerm = normalize(applyMetas(term, context: context), context: context)
+        let normalizedTerm = try normalize(applyMetas(term, context: context), context: context)
             .reduced()
         if let existing = context[meta] {
             try unifyNormalized(
-                applyMetas(existing, context: context).reduced(),
+                try applyMetas(existing, context: context).reduced(),
                 normalizedTerm,
                 context: &context
             )

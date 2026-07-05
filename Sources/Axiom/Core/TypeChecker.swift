@@ -31,6 +31,7 @@ public struct TypeChecker {
     public var metavariables: [String: Term] = [:]
     public var declarations: DeclarationEnvironment
     public let conversion: Conversion
+    public var reductionBudget = ReductionBudget()
 
     public init(
         declarations: DeclarationEnvironment = DeclarationEnvironment(),
@@ -91,14 +92,20 @@ public struct TypeChecker {
                 throw TypeError.declarationUsedAsExpression(term)
             }
             let functionType = try typeCheck(term: function, environment: environment)
-            let reducedFunctionType = conversion.normalize(instantiateHoles(in: functionType))
+            let reducedFunctionType = try conversion.normalize(
+                instantiateHoles(in: functionType),
+                budget: &reductionBudget
+            )
             guard case .pi(let param, let domain, let codomain) = reducedFunctionType else {
                 throw TypeError.notAFunction(function, functionType)
             }
             let argumentType = try typeCheck(term: argument, environment: environment)
             try ensureConvertible(expected: domain, actual: argumentType)
             return instantiateHoles(
-                in: conversion.normalize(codomain.substituting(name: param, with: argument))
+                in: try conversion.normalize(
+                    codomain.substituting(name: param, with: argument),
+                    budget: &reductionBudget
+                )
             )
 
         case .match(let scrutinee, let cases):
@@ -106,7 +113,7 @@ public struct TypeChecker {
                 throw TypeError.emptyMatch
             }
             let scrutineeType = try typeCheck(term: scrutinee, environment: environment)
-            guard inductiveHead(of: scrutineeType) != nil else {
+            guard try inductiveHead(of: scrutineeType) != nil else {
                 throw TypeError.notInductive(scrutinee, scrutineeType)
             }
             var motive: Term?
@@ -197,9 +204,19 @@ public struct TypeChecker {
     }
 
     private mutating func ensureConvertible(expected: Term, actual: Term) throws {
-        let normalizedExpected = conversion.normalize(instantiateHoles(in: expected))
-        let normalizedActual = conversion.normalize(instantiateHoles(in: actual))
-        if conversion.areDefinitionallyEqual(normalizedExpected, normalizedActual) {
+        let normalizedExpected = try conversion.normalize(
+            instantiateHoles(in: expected),
+            budget: &reductionBudget
+        )
+        let normalizedActual = try conversion.normalize(
+            instantiateHoles(in: actual),
+            budget: &reductionBudget
+        )
+        if try conversion.areDefinitionallyEqual(
+            normalizedExpected,
+            normalizedActual,
+            budget: &reductionBudget
+        ) {
             return
         }
         do {
@@ -220,8 +237,11 @@ public struct TypeChecker {
         return level
     }
 
-    private func inductiveHead(of type: Term) -> String? {
-        let normalized = conversion.normalize(instantiateHoles(in: type))
+    private mutating func inductiveHead(of type: Term) throws -> String? {
+        let normalized = try conversion.normalize(
+            instantiateHoles(in: type),
+            budget: &reductionBudget
+        )
         if case .inductive(let name, _) = normalized {
             return name
         }
@@ -229,7 +249,7 @@ public struct TypeChecker {
             return inductiveName
         }
         if case .pi(_, _, let body) = normalized {
-            return inductiveHead(of: body)
+            return try inductiveHead(of: body)
         }
         return nil
     }

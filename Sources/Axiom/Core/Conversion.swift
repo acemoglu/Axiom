@@ -10,29 +10,52 @@ public struct Conversion {
         self.strategy = strategy
     }
 
-    public func normalize(_ term: Term) -> Term {
+    public func normalize(_ term: Term, budget: inout ReductionBudget) throws -> Term {
         switch strategy {
         case .weakHeadNormalForm:
-            return weakHeadNormalize(term)
+            return try weakHeadNormalize(term, budget: &budget)
         case .normalForm:
-            return term.reduced()
+            return try term.reduced(budget: &budget)
         }
     }
 
-    public func areDefinitionallyEqual(_ left: Term, _ right: Term) -> Bool {
-        alphaEquivalent(normalize(left), normalize(right))
+    public func areDefinitionallyEqual(
+        _ left: Term,
+        _ right: Term,
+        budget: inout ReductionBudget
+    ) throws -> Bool {
+        let normalizedLeft = try normalize(left, budget: &budget)
+        let normalizedRight = try normalize(right, budget: &budget)
+        return alphaEquivalent(normalizedLeft, normalizedRight)
     }
 
-    private func weakHeadNormalize(_ term: Term) -> Term {
+    public func normalize(_ term: Term) throws -> Term {
+        var budget = ReductionBudget()
+        return try normalize(term, budget: &budget)
+    }
+
+    public func areDefinitionallyEqual(_ left: Term, _ right: Term) throws -> Bool {
+        var budget = ReductionBudget()
+        return try areDefinitionallyEqual(left, right, budget: &budget)
+    }
+
+    private func weakHeadNormalize(_ term: Term, budget: inout ReductionBudget) throws -> Term {
+        try budget.consume()
         switch term {
         case .application(let function, let argument):
-            let reducedFunction = weakHeadNormalize(function)
+            let reducedFunction = try weakHeadNormalize(function, budget: &budget)
             if case .abstraction(let param, _, let body) = reducedFunction {
-                return weakHeadNormalize(body.substituting(name: param, with: argument))
+                return try weakHeadNormalize(
+                    body.substituting(name: param, with: argument),
+                    budget: &budget
+                )
             }
             return .application(function: reducedFunction, argument: argument)
         case .match(let scrutinee, let cases):
-            return .match(scrutinee: weakHeadNormalize(scrutinee), cases: cases).reduced()
+            return try .match(
+                scrutinee: weakHeadNormalize(scrutinee, budget: &budget),
+                cases: cases
+            ).reduced(budget: &budget)
         default:
             return term
         }

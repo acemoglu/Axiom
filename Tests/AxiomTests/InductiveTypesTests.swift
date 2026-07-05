@@ -17,13 +17,13 @@ final class InductiveTypesTests: XCTestCase {
         let a = Term.variable("a")
         let matchOnZero = Term.match(scrutinee: zero, cases: ["zero": a])
 
-        XCTAssertEqual(matchOnZero.reduced(), a)
+        XCTAssertEqual(try matchOnZero.reduced(), a)
 
         let inferred = try TypeChecker.typeCheck(
             term: matchOnZero,
             environment: ["a": motive]
         )
-        XCTAssertEqual(inferred.reduced(), motive.reduced())
+        XCTAssertEqual(try inferred.reduced(), try motive.reduced())
     }
 
     func testNatAndConstructorsTypecheck() throws {
