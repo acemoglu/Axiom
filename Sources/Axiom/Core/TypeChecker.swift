@@ -24,6 +24,12 @@ public enum TypeError: Error, Equatable, Sendable {
     case nonStrictlyPositive(inductive: String, occurrence: Term)
 
     case unresolvedPositivityHole(String, inductive: String, occurrence: Term)
+
+    case missingMatchCase(String)
+
+    case unknownMatchConstructor(String)
+
+    case matchArityMismatch(constructor: String, expected: Int, actual: Int)
 }
 
 // MARK: - Type checker
@@ -49,6 +55,14 @@ public struct TypeChecker {
     public mutating func typeCheck(
         term: Term,
         environment: [String: Term] = [:]
+    ) throws -> Term {
+        try typeCheck(term: term, environment: environment, expectedType: nil)
+    }
+
+    private mutating func typeCheck(
+        term: Term,
+        environment: [String: Term],
+        expectedType: Term?
     ) throws -> Term {
         if term.role == .declaration {
             return try typeCheckDeclaration(term: term, environment: environment)
@@ -86,10 +100,18 @@ public struct TypeChecker {
             return .universe(max(i, j))
 
         case .abstraction(let param, let paramType, let body):
+            let resolvedParamType = resolvePatternType(paramType, name: param, environment: environment)
             var extended = environment
-            extended[param] = paramType
-            let bodyType = try typeCheck(term: body, environment: extended)
-            return .pi(param: param, type: paramType, body: bodyType)
+            extended[param] = resolvedParamType
+            let bodyExpected = try expectedType.flatMap {
+                try peelExpectedAbstractionBody($0, param: param, paramType: resolvedParamType)
+            }
+            let bodyType = try typeCheck(
+                term: body,
+                environment: extended,
+                expectedType: bodyExpected
+            )
+            return .pi(param: param, type: resolvedParamType, body: bodyType)
 
         case .application(let function, let argument):
             if function.role == .declaration || argument.role == .declaration {
@@ -116,17 +138,64 @@ public struct TypeChecker {
             guard !cases.isEmpty else {
                 throw TypeError.emptyMatch
             }
-            let scrutineeType = try typeCheck(term: scrutinee, environment: environment)
-            guard try inductiveHead(of: scrutineeType) != nil else {
+            let scrutineeType = try typeCheck(
+                term: scrutinee,
+                environment: environment,
+                expectedType: nil
+            )
+            guard let inductiveName = try inductiveHead(of: scrutineeType) else {
                 throw TypeError.notInductive(scrutinee, scrutineeType)
             }
+            for missing in allConstructors(for: inductiveName) where cases[missing] == nil {
+                throw TypeError.missingMatchCase(missing)
+            }
             var motive: Term?
-            for branch in cases.values {
-                let branchType = try typeCheck(term: branch, environment: environment)
-                if let existing = motive {
-                    try ensureConvertible(expected: existing, actual: branchType)
+            let constructorNames = cases.keys.sorted()
+            for constructorName in constructorNames {
+                guard let branch = cases[constructorName] else { continue }
+                guard let constructor = lookupMatchConstructor(
+                    constructorName,
+                    inductiveName: inductiveName
+                ) else {
+                    throw TypeError.unknownMatchConstructor(constructorName)
+                }
+                guard constructorReturnsInductive(constructor.type, inductiveName: inductiveName) else {
+                    throw TypeError.invalidConstructorTarget(
+                        expected: inductiveName,
+                        actual: constructor.type
+                    )
+                }
+                let branchEnvironment = try environmentForMatchBranch(
+                    constructorName: constructorName,
+                    branch: branch,
+                    constructorType: constructor.type,
+                    base: environment
+                )
+                let branchExpectedType = try motive.map {
+                    try expectedMatchBranchType(
+                        constructorName: constructorName,
+                        constructorType: constructor.type,
+                        branch: branch,
+                        motive: $0
+                    )
+                }
+                let branchType = try typeCheck(
+                    term: branch,
+                    environment: branchEnvironment,
+                    expectedType: branchExpectedType
+                )
+                let branchMotive = peelPiCodomain(branchType)
+                if let existingMotive = motive {
+                    let expectedBranchType = try expectedMatchBranchType(
+                        constructorName: constructorName,
+                        constructorType: constructor.type,
+                        branch: branch,
+                        motive: existingMotive
+                    )
+                    try ensureConvertible(expected: expectedBranchType, actual: branchType)
+                    try ensureConvertible(expected: existingMotive, actual: branchMotive)
                 } else {
-                    motive = branchType
+                    motive = branchMotive
                 }
             }
             return instantiateHoles(in: motive!)
@@ -336,5 +405,138 @@ public struct TypeChecker {
         } catch let PositivityError.unresolvedHole(hole, inductive, occurrence) {
             throw TypeError.unresolvedPositivityHole(hole, inductive: inductive, occurrence: occurrence)
         }
+    }
+
+    // MARK: - Match elimination
+
+    private func allConstructors(for inductiveName: String) -> [String] {
+        declarations.allDeclarations
+            .filter {
+                $0.kind == .constructor
+                    && constructorReturnsInductive($0.type, inductiveName: inductiveName)
+            }
+            .map(\.name)
+            .sorted()
+    }
+
+    private func lookupMatchConstructor(_ name: String, inductiveName: String) -> Declaration? {
+        if let declaration = declarations.lookup(name),
+           declaration.kind == .constructor,
+           constructorReturnsInductive(declaration.type, inductiveName: inductiveName) {
+            return declaration
+        }
+        if let declaration = declarations.lookup(resolvingQualifiedName: name),
+           declaration.kind == .constructor,
+           constructorReturnsInductive(declaration.type, inductiveName: inductiveName) {
+            return declaration
+        }
+        return declarations.allDeclarations.first {
+            $0.kind == .constructor
+                && $0.name == name
+                && constructorReturnsInductive($0.type, inductiveName: inductiveName)
+        }
+    }
+
+    private func resolvePatternType(_ type: Term, name: String, environment: [String: Term]) -> Term {
+        if case .hole = type, let resolved = environment[name] {
+            return resolved
+        }
+        return type
+    }
+
+    private func peelPiCodomain(_ type: Term) -> Term {
+        var current = type
+        while case .pi(_, _, let body) = current {
+            current = body
+        }
+        return current
+    }
+
+    private mutating func peelExpectedAbstractionBody(
+        _ expected: Term,
+        param: String,
+        paramType: Term
+    ) throws -> Term? {
+        let normalized = try conversion.normalize(
+            instantiateHoles(in: expected),
+            budget: &reductionBudget
+        )
+        guard case .pi(_, let domain, let body) = normalized else { return nil }
+        do {
+            try ensureConvertible(expected: domain, actual: paramType)
+        } catch {
+            return nil
+        }
+        return body
+    }
+
+    private func peelAbstractionParams(from branch: Term) -> [(String, Term)] {
+        var params: [(String, Term)] = []
+        var current = branch
+        while case .abstraction(let name, let type, let body) = current {
+            params.append((name, type))
+            current = body
+        }
+        return params
+    }
+
+    private func peelPiParams(from type: Term) -> [(String, Term)] {
+        var params: [(String, Term)] = []
+        var current = type
+        while case .pi(let param, let domain, let body) = current {
+            params.append((param, domain))
+            current = body
+        }
+        return params
+    }
+
+    private func payloadParameterTypes(from constructorType: Term) -> [(String, Term)] {
+        peelPiParams(from: constructorType)
+    }
+
+    private mutating func environmentForMatchBranch(
+        constructorName: String,
+        branch: Term,
+        constructorType: Term,
+        base: [String: Term]
+    ) throws -> [String: Term] {
+        let parameterTypes = payloadParameterTypes(from: constructorType)
+        let branchParams = peelAbstractionParams(from: branch)
+        guard parameterTypes.count == branchParams.count else {
+            throw TypeError.matchArityMismatch(
+                constructor: constructorName,
+                expected: parameterTypes.count,
+                actual: branchParams.count
+            )
+        }
+        var environment = base
+        for index in branchParams.indices {
+            environment[branchParams[index].0] = parameterTypes[index].1
+        }
+        return environment
+    }
+
+    private mutating func expectedMatchBranchType(
+        constructorName: String,
+        constructorType: Term,
+        branch: Term,
+        motive: Term
+    ) throws -> Term {
+        let parameterTypes = payloadParameterTypes(from: constructorType)
+        let branchParams = peelAbstractionParams(from: branch)
+        guard parameterTypes.count == branchParams.count else {
+            throw TypeError.matchArityMismatch(
+                constructor: constructorName,
+                expected: parameterTypes.count,
+                actual: branchParams.count
+            )
+        }
+        var result = motive
+        for index in stride(from: branchParams.count - 1, through: 0, by: -1) {
+            let binder = branchParams[index].0
+            let domain = parameterTypes[index].1
+            result = .pi(param: binder, type: domain, body: result)
+        }
+        return result
     }
 }
