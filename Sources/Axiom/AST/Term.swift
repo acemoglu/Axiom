@@ -220,8 +220,11 @@ extension Term {
 
 extension Term {
 
-    public func reduced(budget: inout ReductionBudget) throws -> Term {
+    public func reduced(budget: inout ReductionBudget, unfolding: [String: Term] = [:]) throws -> Term {
         try budget.consume()
+        if case .variable(let name) = self, let value = unfolding[name] {
+            return try value.reduced(budget: &budget, unfolding: unfolding)
+        }
         switch self {
         case .variable, .universe, .hole:
             return self
@@ -229,42 +232,45 @@ extension Term {
         case .pi(let param, let type, let body):
             return .pi(
                 param: param,
-                type: try type.reduced(budget: &budget),
-                body: try body.reduced(budget: &budget)
+                type: try type.reduced(budget: &budget, unfolding: unfolding),
+                body: try body.reduced(budget: &budget, unfolding: unfolding)
             )
 
         case .abstraction(let param, let type, let body):
             return .abstraction(
                 param: param,
-                type: try type.reduced(budget: &budget),
-                body: try body.reduced(budget: &budget)
+                type: try type.reduced(budget: &budget, unfolding: unfolding),
+                body: try body.reduced(budget: &budget, unfolding: unfolding)
             )
 
         case .application(let function, let argument):
-            let reducedFunction = try function.reduced(budget: &budget)
+            let reducedFunction = try function.reduced(budget: &budget, unfolding: unfolding)
             if case .abstraction(let param, _, let body) = reducedFunction {
-                return try body.substituting(name: param, with: argument).reduced(budget: &budget)
+                return try body
+                    .substituting(name: param, with: argument)
+                    .reduced(budget: &budget, unfolding: unfolding)
             }
             return .application(
                 function: reducedFunction,
-                argument: try argument.reduced(budget: &budget)
+                argument: try argument.reduced(budget: &budget, unfolding: unfolding)
             )
 
         case .inductive(let name, let type):
-            return .inductive(name: name, type: try type.reduced(budget: &budget))
+            return .inductive(name: name, type: try type.reduced(budget: &budget, unfolding: unfolding))
 
         case .constructor(let name, let inductiveName, let type):
             return .constructor(
                 name: name,
                 inductiveName: inductiveName,
-                type: try type.reduced(budget: &budget)
+                type: try type.reduced(budget: &budget, unfolding: unfolding)
             )
 
         case .match(let scrutinee, let cases):
             return try reduceMatch(
-                scrutinee: scrutinee.reduced(budget: &budget),
-                cases: try cases.mapValues { try $0.reduced(budget: &budget) },
-                budget: &budget
+                scrutinee: scrutinee.reduced(budget: &budget, unfolding: unfolding),
+                cases: try cases.mapValues { try $0.reduced(budget: &budget, unfolding: unfolding) },
+                budget: &budget,
+                unfolding: unfolding
             )
         }
     }
@@ -279,22 +285,24 @@ extension Term {
     private func reduceMatch(
         scrutinee: Term,
         cases: [String: Term],
-        budget: inout ReductionBudget
+        budget: inout ReductionBudget,
+        unfolding: [String: Term]
     ) throws -> Term {
         switch scrutinee {
         case .constructor(let constructorName, _, _):
             guard let branch = cases[constructorName] else {
                 return .match(scrutinee: scrutinee, cases: cases)
             }
-            return try branch.reduced(budget: &budget)
+            return try branch.reduced(budget: &budget, unfolding: unfolding)
 
         case .application(let function, let argument):
-            let reducedFunction = try function.reduced(budget: &budget)
+            let reducedFunction = try function.reduced(budget: &budget, unfolding: unfolding)
             if case .constructor(let constructorName, _, _) = reducedFunction {
                 guard let branch = cases[constructorName] else {
                     return .match(scrutinee: scrutinee, cases: cases)
                 }
-                return try .application(function: branch, argument: argument).reduced(budget: &budget)
+                return try .application(function: branch, argument: argument)
+                    .reduced(budget: &budget, unfolding: unfolding)
             }
             return .match(scrutinee: scrutinee, cases: cases)
 

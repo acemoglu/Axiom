@@ -30,6 +30,8 @@ public enum TypeError: Error, Equatable, Sendable {
     case unknownMatchConstructor(String)
 
     case matchArityMismatch(constructor: String, expected: Int, actual: Int)
+
+    case unresolvedHole(String, in: Term)
 }
 
 // MARK: - Type checker
@@ -120,7 +122,8 @@ public struct TypeChecker {
             let functionType = try typeCheck(term: function, environment: environment)
             let reducedFunctionType = try conversion.normalize(
                 instantiateHoles(in: functionType),
-                budget: &reductionBudget
+                budget: &reductionBudget,
+                unfolding: transparentDefinitions()
             )
             guard case .pi(let param, let domain, let codomain) = reducedFunctionType else {
                 throw TypeError.notAFunction(function, functionType)
@@ -130,7 +133,8 @@ public struct TypeChecker {
             return instantiateHoles(
                 in: try conversion.normalize(
                     codomain.substituting(name: param, with: argument),
-                    budget: &reductionBudget
+                    budget: &reductionBudget,
+                    unfolding: transparentDefinitions()
                 )
             )
 
@@ -203,6 +207,71 @@ public struct TypeChecker {
         case .inductive, .constructor:
             throw TypeError.declarationUsedAsExpression(term)
         }
+    }
+
+    /// Type-checks a top-level declaration's type and optional value against that type.
+    public mutating func checkDeclaration(_ declaration: Declaration) throws {
+        switch declaration.kind {
+        case .inductive:
+            _ = try typeCheck(term: declaration.type)
+
+        case .constructor:
+            _ = try typeCheck(term: declaration.type)
+            guard let inductiveName = inductiveName(inConstructorType: declaration.type) else {
+                throw TypeError.invalidConstructorTarget(
+                    expected: "<inductive>",
+                    actual: declaration.type
+                )
+            }
+            guard constructorReturnsInductive(declaration.type, inductiveName: inductiveName) else {
+                throw TypeError.invalidConstructorTarget(
+                    expected: inductiveName,
+                    actual: declaration.type
+                )
+            }
+            try checkConstructorPositivity(
+                inductiveName: inductiveName,
+                constructorType: declaration.type
+            )
+
+        case .axiom:
+            _ = try typeCheck(term: declaration.type)
+            try rejectUnresolvedTermHoles(in: declaration.type)
+            try declarations.add(declaration)
+            return
+
+        default:
+            _ = try typeCheck(term: declaration.type)
+            if requiresFullyResolvedTerms(declaration.kind) {
+                try rejectUnresolvedTermHoles(in: declaration.type)
+            }
+        }
+
+        guard let value = declaration.value else {
+            try declarations.add(declaration)
+            return
+        }
+
+        let valueType = try typeCheck(
+            term: value,
+            environment: recursiveCheckEnvironment(for: declaration),
+            expectedType: declaration.type
+        )
+        if requiresFullyResolvedTerms(declaration.kind) {
+            try rejectUnresolvedTermHoles(in: value)
+        }
+        try ensureConvertible(expected: declaration.type, actual: valueType)
+        try declarations.add(declaration)
+    }
+
+    /// Verifies *⊢ term : expected* by inference followed by conversion/unification.
+    public mutating func checkTermMatchesType(
+        _ term: Term,
+        expected: Term,
+        environment: [String: Term] = [:]
+    ) throws {
+        let actual = try typeCheck(term: term, environment: environment)
+        try ensureConvertible(expected: expected, actual: actual)
     }
 
     /// Convenience: type-check with a fresh checker and return an instantiated type.
@@ -279,16 +348,19 @@ public struct TypeChecker {
     private mutating func ensureConvertible(expected: Term, actual: Term) throws {
         let normalizedExpected = try conversion.normalize(
             instantiateHoles(in: expected),
-            budget: &reductionBudget
+            budget: &reductionBudget,
+            unfolding: transparentDefinitions()
         )
         let normalizedActual = try conversion.normalize(
             instantiateHoles(in: actual),
-            budget: &reductionBudget
+            budget: &reductionBudget,
+            unfolding: transparentDefinitions()
         )
         if try conversion.areDefinitionallyEqual(
             normalizedExpected,
             normalizedActual,
-            budget: &reductionBudget
+            budget: &reductionBudget,
+            unfolding: transparentDefinitions()
         ) {
             return
         }
@@ -313,7 +385,8 @@ public struct TypeChecker {
     private mutating func inductiveHead(of type: Term) throws -> String? {
         let normalized = try conversion.normalize(
             instantiateHoles(in: type),
-            budget: &reductionBudget
+            budget: &reductionBudget,
+            unfolding: transparentDefinitions()
         )
         if case .inductive(let name, _) = normalized {
             return name
@@ -407,6 +480,80 @@ public struct TypeChecker {
         }
     }
 
+    // MARK: - Declarations and δ-reduction
+
+    private func recursiveCheckEnvironment(for declaration: Declaration) -> [String: Term] {
+        switch declaration.kind {
+        case .definition, .theorem:
+            return [declaration.name: declaration.type]
+        default:
+            return [:]
+        }
+    }
+
+    private func requiresFullyResolvedTerms(_ kind: DeclarationKind) -> Bool {
+        switch kind {
+        case .definition, .theorem, .constant, .axiom:
+            return true
+        case .constructor, .inductive:
+            return false
+        }
+    }
+
+    private func rejectUnresolvedTermHoles(in term: Term) throws {
+        let resolved = instantiateHoles(in: term)
+        if let hole = unresolvedTermHoles(in: resolved).sorted().first {
+            throw TypeError.unresolvedHole(hole, in: term)
+        }
+    }
+
+    private func unresolvedTermHoles(in term: Term) -> Set<String> {
+        switch term {
+        case .hole(let name):
+            return [name]
+        case .variable, .universe:
+            return []
+        case .application(let function, let argument):
+            return unresolvedTermHoles(in: function).union(unresolvedTermHoles(in: argument))
+        case .abstraction(_, _, let body):
+            return unresolvedTermHoles(in: body)
+        case .pi(_, let domain, let body):
+            return unresolvedTermHoles(in: domain).union(unresolvedTermHoles(in: body))
+        case .match(let scrutinee, let cases):
+            return cases.values.reduce(unresolvedTermHoles(in: scrutinee)) { partial, branch in
+                partial.union(unresolvedTermHoles(in: branch))
+            }
+        case .inductive(_, let type), .constructor(_, _, let type):
+            return unresolvedTermHoles(in: type)
+        }
+    }
+
+    private func transparentDefinitions() -> [String: Term] {
+        var unfolding: [String: Term] = [:]
+        for declaration in declarations.allDeclarations {
+            guard let value = declaration.value else { continue }
+            switch declaration.kind {
+            case .definition, .theorem, .constant:
+                unfolding[declaration.name] = value
+                unfolding[declaration.qualifiedName] = value
+            case .axiom, .inductive, .constructor:
+                break
+            }
+        }
+        return unfolding
+    }
+
+    private func inductiveName(inConstructorType type: Term) -> String? {
+        var current = type
+        while case .pi(_, _, let body) = current {
+            current = body
+        }
+        if case .inductive(let name, _) = current {
+            return name
+        }
+        return nil
+    }
+
     // MARK: - Match elimination
 
     private func allConstructors(for inductiveName: String) -> [String] {
@@ -459,7 +606,8 @@ public struct TypeChecker {
     ) throws -> Term? {
         let normalized = try conversion.normalize(
             instantiateHoles(in: expected),
-            budget: &reductionBudget
+            budget: &reductionBudget,
+            unfolding: transparentDefinitions()
         )
         guard case .pi(_, let domain, let body) = normalized else { return nil }
         do {

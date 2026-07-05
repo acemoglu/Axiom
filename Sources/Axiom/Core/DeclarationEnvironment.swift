@@ -2,6 +2,7 @@ public enum DeclarationKind: String, Equatable, Sendable {
     case constant
     case definition
     case theorem
+    case axiom
     case inductive
     case constructor
 }

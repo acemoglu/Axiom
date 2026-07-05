@@ -10,52 +10,69 @@ public struct Conversion {
         self.strategy = strategy
     }
 
-    public func normalize(_ term: Term, budget: inout ReductionBudget) throws -> Term {
+    public func normalize(
+        _ term: Term,
+        budget: inout ReductionBudget,
+        unfolding: [String: Term] = [:]
+    ) throws -> Term {
         switch strategy {
         case .weakHeadNormalForm:
-            return try weakHeadNormalize(term, budget: &budget)
+            return try weakHeadNormalize(term, budget: &budget, unfolding: unfolding)
         case .normalForm:
-            return try term.reduced(budget: &budget)
+            return try term.reduced(budget: &budget, unfolding: unfolding)
         }
     }
 
     public func areDefinitionallyEqual(
         _ left: Term,
         _ right: Term,
-        budget: inout ReductionBudget
+        budget: inout ReductionBudget,
+        unfolding: [String: Term] = [:]
     ) throws -> Bool {
-        let normalizedLeft = try normalize(left, budget: &budget)
-        let normalizedRight = try normalize(right, budget: &budget)
+        let normalizedLeft = try normalize(left, budget: &budget, unfolding: unfolding)
+        let normalizedRight = try normalize(right, budget: &budget, unfolding: unfolding)
         return alphaEquivalent(normalizedLeft, normalizedRight)
     }
 
-    public func normalize(_ term: Term) throws -> Term {
+    public func normalize(_ term: Term, unfolding: [String: Term] = [:]) throws -> Term {
         var budget = ReductionBudget()
-        return try normalize(term, budget: &budget)
+        return try normalize(term, budget: &budget, unfolding: unfolding)
     }
 
-    public func areDefinitionallyEqual(_ left: Term, _ right: Term) throws -> Bool {
+    public func areDefinitionallyEqual(
+        _ left: Term,
+        _ right: Term,
+        unfolding: [String: Term] = [:]
+    ) throws -> Bool {
         var budget = ReductionBudget()
-        return try areDefinitionallyEqual(left, right, budget: &budget)
+        return try areDefinitionallyEqual(left, right, budget: &budget, unfolding: unfolding)
     }
 
-    private func weakHeadNormalize(_ term: Term, budget: inout ReductionBudget) throws -> Term {
+    private func weakHeadNormalize(
+        _ term: Term,
+        budget: inout ReductionBudget,
+        unfolding: [String: Term]
+    ) throws -> Term {
         try budget.consume()
+        if case .variable(let name) = term, let value = unfolding[name] {
+            return try weakHeadNormalize(value, budget: &budget, unfolding: unfolding)
+        }
         switch term {
         case .application(let function, let argument):
-            let reducedFunction = try weakHeadNormalize(function, budget: &budget)
+            let reducedFunction = try weakHeadNormalize(function, budget: &budget, unfolding: unfolding)
             if case .abstraction(let param, _, let body) = reducedFunction {
                 return try weakHeadNormalize(
                     body.substituting(name: param, with: argument),
-                    budget: &budget
+                    budget: &budget,
+                    unfolding: unfolding
                 )
             }
             return .application(function: reducedFunction, argument: argument)
         case .match(let scrutinee, let cases):
             return try .match(
-                scrutinee: weakHeadNormalize(scrutinee, budget: &budget),
+                scrutinee: weakHeadNormalize(scrutinee, budget: &budget, unfolding: unfolding),
                 cases: cases
-            ).reduced(budget: &budget)
+            ).reduced(budget: &budget, unfolding: unfolding)
         default:
             return term
         }
