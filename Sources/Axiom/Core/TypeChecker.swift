@@ -20,6 +20,10 @@ public enum TypeError: Error, Equatable, Sendable {
     case declarationUsedAsExpression(Term)
 
     case invalidConstructorTarget(expected: String, actual: Term)
+
+    case nonStrictlyPositive(inductive: String, occurrence: Term)
+
+    case unresolvedPositivityHole(String, inductive: String, occurrence: Term)
 }
 
 // MARK: - Type checker
@@ -273,6 +277,7 @@ public struct TypeChecker {
             guard constructorReturnsInductive(type, inductiveName: inductiveName) else {
                 throw TypeError.invalidConstructorTarget(expected: inductiveName, actual: type)
             }
+            try checkConstructorPositivity(inductiveName: inductiveName, constructorType: type)
             let declaration = Declaration(
                 name: constructorName,
                 kind: .constructor,
@@ -297,5 +302,39 @@ public struct TypeChecker {
             return name == inductiveName
         }
         return false
+    }
+
+    /// Verifies strict positivity for constructor types registered against an inductive.
+    public func checkConstructorPositivity(
+        inductiveName: String,
+        constructorType: Term
+    ) throws {
+        do {
+            try PositivityChecker().check(
+                inductiveName: inductiveName,
+                constructorTypes: [constructorType]
+            )
+        } catch let PositivityError.negativeOccurrence(inductive, occurrence) {
+            throw TypeError.nonStrictlyPositive(inductive: inductive, occurrence: occurrence)
+        } catch let PositivityError.unresolvedHole(hole, inductive, occurrence) {
+            throw TypeError.unresolvedPositivityHole(hole, inductive: inductive, occurrence: occurrence)
+        }
+    }
+
+    /// Verifies strict positivity for every constructor of an inductive already in the environment.
+    public func checkInductivePositivity(inductiveName: String) throws {
+        let constructorTypes = declarations.allDeclarations
+            .filter { $0.kind == .constructor && constructorReturnsInductive($0.type, inductiveName: inductiveName) }
+            .map(\.type)
+        do {
+            try PositivityChecker().check(
+                inductiveName: inductiveName,
+                constructorTypes: constructorTypes
+            )
+        } catch let PositivityError.negativeOccurrence(inductive, occurrence) {
+            throw TypeError.nonStrictlyPositive(inductive: inductive, occurrence: occurrence)
+        } catch let PositivityError.unresolvedHole(hole, inductive, occurrence) {
+            throw TypeError.unresolvedPositivityHole(hole, inductive: inductive, occurrence: occurrence)
+        }
     }
 }
