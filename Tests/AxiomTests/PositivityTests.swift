@@ -71,4 +71,39 @@ final class PositivityTests: XCTestCase {
             XCTAssertEqual(inductive, "Bad")
         }
     }
+
+    func testDeclarationEnvironmentRejectsNegativeConstructor() {
+        let bad = Term.inductive(name: "Bad", type: .universe(0))
+        let negativeArg = Term.pi(param: "x", type: bad, body: bad)
+        let constructorType = Term.pi(param: "f", type: negativeArg, body: bad)
+
+        var env = DeclarationEnvironment()
+        XCTAssertNoThrow(try env.add(Declaration(name: "Bad", kind: .inductive, type: .universe(0))))
+        XCTAssertThrowsError(
+            try env.add(
+                Declaration(name: "bad", kind: .constructor, type: constructorType)
+            )
+        ) { error in
+            guard case .negativeOccurrence(let inductive, _) = error as? PositivityError else {
+                return XCTFail("Expected negativeOccurrence, got \(error)")
+            }
+            XCTAssertEqual(inductive, "Bad")
+        }
+    }
+
+    func testDeclarationEnvironmentRejectsVariableConstructorCodomain() {
+        let constructorType = Term.pi(param: "x", type: .universe(0), body: .variable("Bad"))
+
+        var env = DeclarationEnvironment()
+        XCTAssertNoThrow(try env.add(Declaration(name: "Bad", kind: .inductive, type: .universe(0))))
+        XCTAssertThrowsError(
+            try env.add(
+                Declaration(name: "bad", kind: .constructor, type: constructorType)
+            )
+        ) { error in
+            guard case .invalidConstructorCodomain = error as? DeclarationEnvironmentError else {
+                return XCTFail("Expected invalidConstructorCodomain, got \(error)")
+            }
+        }
+    }
 }

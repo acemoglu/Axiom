@@ -120,6 +120,15 @@ While legacy proof assistants rely on heavy server-side infrastructure and compl
 * **Lock-Free Concurrency Model:** Built with Swift's `StrictConcurrency` features. Core nodes and errors are explicitly `Sendable`. The `TypeChecker` and `Unifier` are designed as lightweight, state-isolated `struct`s. This lock-free design allows you to safely parallelize proof verification across multiple CPU/NPU cores by simply instantiating independent checkers per thread, avoiding mutex bottlenecks.
 * **Acyclic Safety & Occurs-Check:** Metavariable instantiation is protected by mathematically rigorous occurs-checks. By utilizing targeted `Set<String>` membership tracking on free metavariables, the Unifier deterministically halts cyclic expansions, preventing infinite loops and stack overflows.
 
+## Trusted Core (v1.0)
+
+The kernel's soundness boundary includes:
+
+* **Strict positivity** enforced at every constructor registration (`DeclarationEnvironment.add`), including rejection of non-inductive codomains.
+* **Structural termination** with mutual-recursion SCC analysis re-validating the entire cluster on every `definition`/`theorem` registration (including via `DeclarationEnvironment.add`).
+* **Dependent elimination** with an explicit match motive; δ-reduction and match elimination resolve registered constructor heads from the environment.
+* **Axiom quarantine:** `DeclarationKind.axiom` declarations are typed and stored but **never** δ-unfolded. Treat axioms as explicit assumptions outside a fully verified development.
+
 ## License
 
 Axiom is released under the [Apache License 2.0](LICENSE).

@@ -302,27 +302,36 @@ extension Term {
         budget: inout ReductionBudget,
         unfolding: [String: Term]
     ) throws -> Term {
-        switch scrutinee {
-        case .constructor(let constructorName, _, _):
-            guard let branch = cases[constructorName] else {
-                return .match(scrutinee: scrutinee, motive: motive, cases: cases)
-            }
-            return try branch.reduced(budget: &budget, unfolding: unfolding)
-
-        case .application(let function, let argument):
-            let reducedFunction = try function.reduced(budget: &budget, unfolding: unfolding)
-            if case .constructor(let constructorName, _, _) = reducedFunction {
-                guard let branch = cases[constructorName] else {
-                    return .match(scrutinee: scrutinee, motive: motive, cases: cases)
-                }
-                return try .application(function: branch, argument: argument)
-                    .reduced(budget: &budget, unfolding: unfolding)
-            }
-            return .match(scrutinee: scrutinee, motive: motive, cases: cases)
-
-        default:
+        let (head, arguments) = peelApplicationSpine(scrutinee)
+        let resolvedHead = resolveConstructorHead(head, unfolding: unfolding)
+        guard case .constructor(let constructorName, _, _) = resolvedHead else {
             return .match(scrutinee: scrutinee, motive: motive, cases: cases)
         }
+        guard let branch = cases[constructorName] else {
+            return .match(scrutinee: scrutinee, motive: motive, cases: cases)
+        }
+        var result = branch
+        for argument in arguments {
+            result = .application(function: result, argument: argument)
+        }
+        return try result.reduced(budget: &budget, unfolding: unfolding)
+    }
+
+    private func resolveConstructorHead(_ head: Term, unfolding: [String: Term]) -> Term {
+        if case .variable(let name) = head, let unfolded = unfolding[name] {
+            return resolveConstructorHead(unfolded, unfolding: unfolding)
+        }
+        return head
+    }
+
+    private func peelApplicationSpine(_ term: Term) -> (head: Term, arguments: [Term]) {
+        var arguments: [Term] = []
+        var current = term
+        while case .application(let function, let argument) = current {
+            arguments.append(argument)
+            current = function
+        }
+        return (current, arguments.reversed())
     }
 }
 

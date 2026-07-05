@@ -9,7 +9,12 @@ public struct TerminationChecker {
     public init() {}
 
     public func checkDefinition(name: String, value: Term) throws {
-        guard containsSelfCall(value, name: name) else { return }
+        try checkDefinition(name: name, value: value, cluster: [name])
+    }
+
+    /// Verifies termination for a definition within its mutually-recursive cluster.
+    public func checkDefinition(name: String, value: Term, cluster: Set<String>) throws {
+        guard containsCall(to: cluster, in: value) else { return }
 
         let (parameters, body) = peelAbstractions(value)
         guard case .match(let scrutinee, _, let cases) = body,
@@ -22,13 +27,13 @@ public struct TerminationChecker {
 
         for (_, branch) in cases {
             let binders = branchPatternBinders(branch)
-            if containsBareSelfReference(in: branch, name: name) {
+            if containsBareRecursiveReference(in: branch, targets: cluster) {
                 throw TerminationError.recursionNotOnSmallerArgument(
                     name,
                     callArgument: name
                 )
             }
-            for arguments in selfCallArgumentTerms(in: branch, name: name) {
+            for arguments in callArgumentTerms(in: branch, targets: cluster) {
                 try validateStructuralDescent(
                     arguments: arguments,
                     binders: binders,
@@ -36,6 +41,48 @@ public struct TerminationChecker {
                 )
             }
         }
+    }
+
+    /// Validates termination for every member of the SCC containing a new definition.
+    public func checkClusterTermination(
+        newName: String,
+        newValue: Term,
+        existingDeclarations: [Declaration]
+    ) throws {
+        let definable = existingDeclarations.filter {
+            ($0.kind == .definition || $0.kind == .theorem) && $0.value != nil
+        }
+        var names = Set(definable.map(\.name))
+        names.insert(newName)
+        var callGraph = buildCallGraph(for: definable, among: names)
+        callGraph[newName] = calleeNames(in: newValue, among: names)
+        let cluster = sccContaining(newName, in: callGraph, nodes: names)
+        let defsByName = Dictionary(uniqueKeysWithValues: definable.map { ($0.name, $0) })
+
+        for member in cluster.sorted() {
+            let value: Term
+            if member == newName {
+                value = newValue
+            } else if let existing = defsByName[member]?.value {
+                value = existing
+            } else {
+                continue
+            }
+            try checkDefinition(name: member, value: value, cluster: cluster)
+        }
+    }
+
+    /// Checks termination for a new definition against existing declarations in the environment.
+    public func checkMutualTermination(
+        name: String,
+        value: Term,
+        existingDeclarations: [Declaration]
+    ) throws {
+        try checkClusterTermination(
+            newName: name,
+            newValue: value,
+            existingDeclarations: existingDeclarations
+        )
     }
 
     private func validateStructuralDescent(
@@ -58,6 +105,112 @@ public struct TerminationChecker {
         }
     }
 
+    private func buildCallGraph(for declarations: [Declaration], among names: Set<String>) -> [String: Set<String>] {
+        var graph: [String: Set<String>] = [:]
+        for declaration in declarations {
+            guard let value = declaration.value else { continue }
+            graph[declaration.name] = calleeNames(in: value, among: names)
+        }
+        return graph
+    }
+
+    private func calleeNames(in term: Term, among names: Set<String>) -> Set<String> {
+        var callees: Set<String> = []
+        collectCalleeNames(in: term, among: names, into: &callees)
+        return callees
+    }
+
+    private func collectCalleeNames(
+        in term: Term,
+        among names: Set<String>,
+        into callees: inout Set<String>
+    ) {
+        switch term {
+        case .application(let function, let argument):
+            if let callee = headVariable(in: function), names.contains(callee) {
+                callees.insert(callee)
+            }
+            collectCalleeNames(in: function, among: names, into: &callees)
+            collectCalleeNames(in: argument, among: names, into: &callees)
+        case .abstraction(_, _, let body):
+            collectCalleeNames(in: body, among: names, into: &callees)
+        case .match(let scrutinee, let motive, let cases):
+            collectCalleeNames(in: scrutinee, among: names, into: &callees)
+            collectCalleeNames(in: motive, among: names, into: &callees)
+            for branch in cases.values {
+                collectCalleeNames(in: branch, among: names, into: &callees)
+            }
+        case .pi(_, let domain, let body):
+            collectCalleeNames(in: domain, among: names, into: &callees)
+            collectCalleeNames(in: body, among: names, into: &callees)
+        case .inductive(_, let type), .constructor(_, _, let type):
+            collectCalleeNames(in: type, among: names, into: &callees)
+        case .hole, .universe, .variable:
+            break
+        }
+    }
+
+    private func headVariable(in term: Term) -> String? {
+        var current = term
+        while case .application(let function, _) = current {
+            current = function
+        }
+        if case .variable(let name) = current {
+            return name
+        }
+        return nil
+    }
+
+    private func sccContaining(
+        _ node: String,
+        in graph: [String: Set<String>],
+        nodes: Set<String>
+    ) -> Set<String> {
+        var index = 0
+        var stack: [String] = []
+        var onStack: Set<String> = []
+        var indices: [String: Int] = [:]
+        var lowlinks: [String: Int] = [:]
+        var sccs: [[String]] = []
+
+        func strongConnect(_ vertex: String) {
+            indices[vertex] = index
+            lowlinks[vertex] = index
+            index += 1
+            stack.append(vertex)
+            onStack.insert(vertex)
+
+            for successor in graph[vertex, default: []] where nodes.contains(successor) {
+                if indices[successor] == nil {
+                    strongConnect(successor)
+                    lowlinks[vertex] = min(lowlinks[vertex]!, lowlinks[successor]!)
+                } else if onStack.contains(successor) {
+                    lowlinks[vertex] = min(lowlinks[vertex]!, indices[successor]!)
+                }
+            }
+
+            if lowlinks[vertex] == indices[vertex] {
+                var component: [String] = []
+                while true {
+                    let w = stack.removeLast()
+                    onStack.remove(w)
+                    component.append(w)
+                    if w == vertex { break }
+                }
+                sccs.append(component)
+            }
+        }
+
+        for vertex in nodes where indices[vertex] == nil {
+            strongConnect(vertex)
+        }
+
+        for component in sccs where component.contains(node) {
+            return Set(component)
+        }
+        return [node]
+    }
+
     private func peelAbstractions(_ term: Term) -> (parameters: [String], body: Term) {
         var parameters: [String] = []
         var current = term
@@ -78,101 +231,101 @@ public struct TerminationChecker {
         return binders
     }
 
-    private func containsSelfCall(_ term: Term, name: String) -> Bool {
+    private func containsCall(to targets: Set<String>, in term: Term) -> Bool {
         switch term {
         case .variable(let variableName):
-            return variableName == name
+            return targets.contains(variableName)
         case .application(let function, let argument):
-            return containsSelfCall(function, name: name) || containsSelfCall(argument, name: name)
+            return containsCall(to: targets, in: function) || containsCall(to: targets, in: argument)
         case .abstraction(_, _, let body):
-            return containsSelfCall(body, name: name)
+            return containsCall(to: targets, in: body)
         case .match(let scrutinee, _, let cases):
-            return containsSelfCall(scrutinee, name: name)
-                || cases.values.contains { containsSelfCall($0, name: name) }
+            return containsCall(to: targets, in: scrutinee)
+                || cases.values.contains { containsCall(to: targets, in: $0) }
         case .pi(_, let domain, let body):
-            return containsSelfCall(domain, name: name) || containsSelfCall(body, name: name)
+            return containsCall(to: targets, in: domain) || containsCall(to: targets, in: body)
         case .inductive(_, let type), .constructor(_, _, let type):
-            return containsSelfCall(type, name: name)
+            return containsCall(to: targets, in: type)
         case .hole, .universe:
             return false
         }
     }
 
-    private func containsBareSelfReference(in term: Term, name: String) -> Bool {
+    private func containsBareRecursiveReference(in term: Term, targets: Set<String>) -> Bool {
         switch term {
         case .variable(let variableName):
-            return variableName == name
+            return targets.contains(variableName)
         case .application(let function, let argument):
-            if isSelfCallHead(function, name: name) {
-                return containsBareSelfReference(in: argument, name: name)
+            if isRecursiveCallHead(function, targets: targets) {
+                return containsBareRecursiveReference(in: argument, targets: targets)
             }
-            return containsBareSelfReference(in: function, name: name)
-                || containsBareSelfReference(in: argument, name: name)
+            return containsBareRecursiveReference(in: function, targets: targets)
+                || containsBareRecursiveReference(in: argument, targets: targets)
         case .abstraction(_, _, let body):
-            return containsBareSelfReference(in: body, name: name)
+            return containsBareRecursiveReference(in: body, targets: targets)
         case .match(let scrutinee, _, let cases):
-            return containsBareSelfReference(in: scrutinee, name: name)
-                || cases.values.contains { containsBareSelfReference(in: $0, name: name) }
+            return containsBareRecursiveReference(in: scrutinee, targets: targets)
+                || cases.values.contains { containsBareRecursiveReference(in: $0, targets: targets) }
         case .pi(_, let domain, let body):
-            return containsBareSelfReference(in: domain, name: name)
-                || containsBareSelfReference(in: body, name: name)
+            return containsBareRecursiveReference(in: domain, targets: targets)
+                || containsBareRecursiveReference(in: body, targets: targets)
         case .inductive(_, let type), .constructor(_, _, let type):
-            return containsBareSelfReference(in: type, name: name)
+            return containsBareRecursiveReference(in: type, targets: targets)
         case .hole, .universe:
             return false
         }
     }
 
-    private func isSelfCallHead(_ function: Term, name: String) -> Bool {
+    private func isRecursiveCallHead(_ function: Term, targets: Set<String>) -> Bool {
         if case .variable(let variableName) = function {
-            return variableName == name
+            return targets.contains(variableName)
         }
         var current = function
         while case .application(let head, _) = current {
             current = head
         }
         if case .variable(let variableName) = current {
-            return variableName == name
+            return targets.contains(variableName)
         }
         return false
     }
 
-    private func selfCallArgumentTerms(in term: Term, name: String) -> [[Term]] {
+    private func callArgumentTerms(in term: Term, targets: Set<String>) -> [[Term]] {
         var sites: [[Term]] = []
-        collectSelfCallSites(term, name: name, into: &sites)
+        collectCallSites(term, targets: targets, into: &sites)
         return sites
     }
 
-    private func collectSelfCallSites(_ term: Term, name: String, into sites: inout [[Term]]) {
-        if let arguments = maximalSelfCallArguments(in: term, name: name) {
+    private func collectCallSites(_ term: Term, targets: Set<String>, into sites: inout [[Term]]) {
+        if let arguments = maximalCallArguments(in: term, targets: targets) {
             sites.append(arguments)
             for argument in arguments {
-                collectSelfCallSites(argument, name: name, into: &sites)
+                collectCallSites(argument, targets: targets, into: &sites)
             }
             return
         }
         switch term {
         case .application(let function, let argument):
-            collectSelfCallSites(function, name: name, into: &sites)
-            collectSelfCallSites(argument, name: name, into: &sites)
+            collectCallSites(function, targets: targets, into: &sites)
+            collectCallSites(argument, targets: targets, into: &sites)
         case .pi(_, let domain, let body):
-            collectSelfCallSites(domain, name: name, into: &sites)
-            collectSelfCallSites(body, name: name, into: &sites)
+            collectCallSites(domain, targets: targets, into: &sites)
+            collectCallSites(body, targets: targets, into: &sites)
         case .abstraction(_, let paramType, let body):
-            collectSelfCallSites(paramType, name: name, into: &sites)
-            collectSelfCallSites(body, name: name, into: &sites)
+            collectCallSites(paramType, targets: targets, into: &sites)
+            collectCallSites(body, targets: targets, into: &sites)
         case .match(let scrutinee, let motive, let cases):
-            collectSelfCallSites(scrutinee, name: name, into: &sites)
-            collectSelfCallSites(motive, name: name, into: &sites)
+            collectCallSites(scrutinee, targets: targets, into: &sites)
+            collectCallSites(motive, targets: targets, into: &sites)
             for branch in cases.values {
-                collectSelfCallSites(branch, name: name, into: &sites)
+                collectCallSites(branch, targets: targets, into: &sites)
             }
         case .hole, .universe, .variable, .inductive, .constructor:
             break
         }
     }
 
-    private func maximalSelfCallArguments(in term: Term, name: String) -> [Term]? {
+    private func maximalCallArguments(in term: Term, targets: Set<String>) -> [Term]? {
         guard case .application = term else { return nil }
         var arguments: [Term] = []
         var current = term
@@ -180,7 +333,7 @@ public struct TerminationChecker {
             arguments.append(argument)
             current = function
         }
-        guard case .variable(let functionName) = current, functionName == name else {
+        guard case .variable(let functionName) = current, targets.contains(functionName) else {
             return nil
         }
         return arguments.reversed()

@@ -205,6 +205,85 @@ final class InductiveTypesTests: XCTestCase {
         XCTAssertTrue(try Conversion().areDefinitionallyEqual(inferred, expected))
     }
 
+    func testMultiArgumentMatchReduction() throws {
+        let elem = Term.universe(0)
+        let list = Term.inductive(name: "List", type: .universe(0))
+        let nilType = list
+        let consType = Term.pi(
+            param: "h",
+            type: elem,
+            body: Term.pi(param: "t", type: list, body: list)
+        )
+
+        var env = DeclarationEnvironment()
+        try env.add(Declaration(name: "List", kind: .inductive, type: .universe(0)))
+        try env.add(Declaration(name: "nil", kind: .constructor, type: nilType))
+        try env.add(Declaration(name: "cons", kind: .constructor, type: consType))
+
+        let head = Term.variable("h")
+        let tail = Term.variable("t")
+        let witness = Term.variable("w")
+        let cons = Term.constructor(name: "cons", inductiveName: "List", type: consType)
+        let consHT = Term.application(
+            function: Term.application(function: cons, argument: head),
+            argument: tail
+        )
+        let motive = Term.constantMotive(scrutineeType: list, returnType: witness)
+        let matchTerm = Term.match(
+            scrutinee: consHT,
+            motive: motive,
+            cases: [
+                "nil": witness,
+                "cons": Term.abstraction(
+                    param: "h",
+                    type: elem,
+                    body: Term.abstraction(param: "t", type: list, body: witness)
+                ),
+            ]
+        )
+
+        XCTAssertEqual(try matchTerm.reduced(), witness)
+    }
+
+    func testMultiArgumentMatchReductionWithVariableConstructorHead() throws {
+        let elem = Term.universe(0)
+        let list = Term.inductive(name: "List", type: .universe(0))
+        let consType = Term.pi(
+            param: "h",
+            type: elem,
+            body: Term.pi(param: "t", type: list, body: list)
+        )
+        let consHead = Term.constructor(name: "cons", inductiveName: "List", type: consType)
+
+        let head = Term.variable("h")
+        let tail = Term.variable("t")
+        let witness = Term.variable("w")
+        let consHT = Term.application(
+            function: Term.application(function: .variable("cons"), argument: head),
+            argument: tail
+        )
+        let motive = Term.constantMotive(scrutineeType: list, returnType: witness)
+        let matchTerm = Term.match(
+            scrutinee: consHT,
+            motive: motive,
+            cases: [
+                "nil": witness,
+                "cons": Term.abstraction(
+                    param: "h",
+                    type: elem,
+                    body: Term.abstraction(param: "t", type: list, body: witness)
+                ),
+            ]
+        )
+
+        var budget = ReductionBudget()
+        let reduced = try matchTerm.reduced(
+            budget: &budget,
+            unfolding: ["cons": consHead]
+        )
+        XCTAssertEqual(reduced, witness)
+    }
+
     func testDependentMatchRejectsWrongZeroBranch() throws {
         var env = try natEnvironment()
         let vecType = Term.pi(param: "n", type: nat, body: Term.universe(0))

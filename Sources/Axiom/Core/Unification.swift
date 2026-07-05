@@ -23,22 +23,26 @@ public struct Unifier {
     ///
     /// Both terms are β-normalized and metavariables are expanded from ``context`` before
     /// each step. Solved holes map to their instantiated terms (chained lookups).
+    /// ``unfolding`` supplies transparent δ-definitions used during normalization.
     public static func unify(
         _ t1: Term,
         _ t2: Term,
         conversion: Conversion = Conversion(),
+        unfolding: [String: Term] = [:],
         context: inout [String: Term]
     ) throws {
         var budget = ReductionBudget()
         let left = try conversion.normalize(
             normalize(applyMetas(t1, context: context), context: context),
-            budget: &budget
+            budget: &budget,
+            unfolding: unfolding
         )
         let right = try conversion.normalize(
             normalize(applyMetas(t2, context: context), context: context),
-            budget: &budget
+            budget: &budget,
+            unfolding: unfolding
         )
-        try unifyNormalized(left, right, context: &context)
+        try unifyNormalized(left, right, conversion: conversion, unfolding: unfolding, context: &context)
     }
 
     // MARK: - Private
@@ -46,17 +50,19 @@ public struct Unifier {
     private static func unifyNormalized(
         _ t1: Term,
         _ t2: Term,
+        conversion: Conversion,
+        unfolding: [String: Term],
         context: inout [String: Term]
     ) throws {
         if structurallyEqual(t1, t2) { return }
 
         switch (t1, t2) {
         case (.hole(let meta), _):
-            try solve(meta: meta, with: t2, context: &context)
+            try solve(meta: meta, with: t2, conversion: conversion, unfolding: unfolding, context: &context)
             return
 
         case (_, .hole(let meta)):
-            try solve(meta: meta, with: t1, context: &context)
+            try solve(meta: meta, with: t1, conversion: conversion, unfolding: unfolding, context: &context)
             return
 
         case (.universe(let i), .universe(let j)):
@@ -64,12 +70,12 @@ public struct Unifier {
             return
 
         case (.application(let f1, let a1), .application(let f2, let a2)):
-            try unifyNormalized(f1, f2, context: &context)
-            try unifyNormalized(a1, a2, context: &context)
+            try unifyNormalized(f1, f2, conversion: conversion, unfolding: unfolding, context: &context)
+            try unifyNormalized(a1, a2, conversion: conversion, unfolding: unfolding, context: &context)
             return
 
         case (.pi(let p1, let ty1, let b1), .pi(let p2, let ty2, let b2)):
-            try unifyNormalized(ty1, ty2, context: &context)
+            try unifyNormalized(ty1, ty2, conversion: conversion, unfolding: unfolding, context: &context)
             let fresh = freshName(
                 avoiding: b1.allVariableNames
                     .union(b2.allVariableNames)
@@ -77,11 +83,11 @@ public struct Unifier {
             )
             let freshened1 = b1.substituting(name: p1, with: .variable(fresh))
             let freshened2 = b2.substituting(name: p2, with: .variable(fresh))
-            try unifyNormalized(freshened1, freshened2, context: &context)
+            try unifyNormalized(freshened1, freshened2, conversion: conversion, unfolding: unfolding, context: &context)
             return
 
         case (.abstraction(let p1, let ty1, let b1), .abstraction(let p2, let ty2, let b2)):
-            try unifyNormalized(ty1, ty2, context: &context)
+            try unifyNormalized(ty1, ty2, conversion: conversion, unfolding: unfolding, context: &context)
             let fresh = freshName(
                 avoiding: b1.allVariableNames
                     .union(b2.allVariableNames)
@@ -89,12 +95,12 @@ public struct Unifier {
             )
             let freshened1 = b1.substituting(name: p1, with: .variable(fresh))
             let freshened2 = b2.substituting(name: p2, with: .variable(fresh))
-            try unifyNormalized(freshened1, freshened2, context: &context)
+            try unifyNormalized(freshened1, freshened2, conversion: conversion, unfolding: unfolding, context: &context)
             return
 
         case (.inductive(let n1, let s1), .inductive(let n2, let s2)):
             guard n1 == n2 else { throw UnificationError.unificationMismatch(t1, t2) }
-            try unifyNormalized(s1, s2, context: &context)
+            try unifyNormalized(s1, s2, conversion: conversion, unfolding: unfolding, context: &context)
             return
 
         case (
@@ -104,7 +110,7 @@ public struct Unifier {
             guard c1 == c2, i1 == i2 else {
                 throw UnificationError.unificationMismatch(t1, t2)
             }
-            try unifyNormalized(ty1, ty2, context: &context)
+            try unifyNormalized(ty1, ty2, conversion: conversion, unfolding: unfolding, context: &context)
             return
 
         default:
@@ -115,14 +121,26 @@ public struct Unifier {
     private static func solve(
         meta: String,
         with term: Term,
+        conversion: Conversion,
+        unfolding: [String: Term],
         context: inout [String: Term]
     ) throws {
-        let normalizedTerm = try normalize(applyMetas(term, context: context), context: context)
-            .reduced()
+        var budget = ReductionBudget()
+        let normalizedTerm = try conversion.normalize(
+            normalize(applyMetas(term, context: context), context: context),
+            budget: &budget,
+            unfolding: unfolding
+        )
         if let existing = context[meta] {
             try unifyNormalized(
-                try applyMetas(existing, context: context).reduced(),
+                try conversion.normalize(
+                    applyMetas(existing, context: context),
+                    budget: &budget,
+                    unfolding: unfolding
+                ),
                 normalizedTerm,
+                conversion: conversion,
+                unfolding: unfolding,
                 context: &context
             )
             return

@@ -10,6 +10,21 @@ final class TypeInferenceTests: XCTestCase {
         XCTAssertEqual(context["T"], .universe(0))
     }
 
+    func testUnifyRespectsDeltaUnfolding() throws {
+        let nat = Term.inductive(name: "Nat", type: .universe(0))
+        let zero = Term.constructor(name: "zero", inductiveName: "Nat", type: nat)
+        let unfolding = ["box": zero]
+
+        var context: [String: Term] = [:]
+        try Unifier.unify(
+            .hole("T"),
+            .variable("box"),
+            unfolding: unfolding,
+            context: &context
+        )
+        XCTAssertTrue(try Conversion().areDefinitionallyEqual(context["T"]!, zero))
+    }
+
     func testIdentityApplicationInfersHole() throws {
         let id = Term.abstraction(
             param: "x",

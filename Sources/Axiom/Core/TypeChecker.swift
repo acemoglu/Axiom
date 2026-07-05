@@ -125,7 +125,7 @@ public struct TypeChecker {
             let reducedFunctionType = try conversion.normalize(
                 instantiateHoles(in: functionType),
                 budget: &reductionBudget,
-                unfolding: transparentDefinitions()
+                unfolding: reductionUnfolding()
             )
             guard case .pi(let param, let domain, let codomain) = reducedFunctionType else {
                 throw TypeError.notAFunction(function, functionType)
@@ -136,7 +136,7 @@ public struct TypeChecker {
                 in: try conversion.normalize(
                     codomain.substituting(name: param, with: argument),
                     budget: &reductionBudget,
-                    unfolding: transparentDefinitions()
+                    unfolding: reductionUnfolding()
                 )
             )
 
@@ -155,13 +155,13 @@ public struct TypeChecker {
             let normalizedScrutineeType = try conversion.normalize(
                 instantiateHoles(in: scrutineeType),
                 budget: &reductionBudget,
-                unfolding: transparentDefinitions()
+                unfolding: reductionUnfolding()
             )
             let motiveType = try typeCheck(term: motive, environment: environment)
             let normalizedMotiveType = try conversion.normalize(
                 instantiateHoles(in: motiveType),
                 budget: &reductionBudget,
-                unfolding: transparentDefinitions()
+                unfolding: reductionUnfolding()
             )
             guard case .pi(let motiveParam, let motiveDomain, let motiveCodomain) = normalizedMotiveType else {
                 throw TypeError.motiveMismatch(expected: normalizedScrutineeType, actual: motiveType)
@@ -262,7 +262,11 @@ public struct TypeChecker {
 
         if declaration.kind == .definition || declaration.kind == .theorem {
             do {
-                try TerminationChecker().checkDefinition(name: declaration.name, value: value)
+                try TerminationChecker().checkClusterTermination(
+                    newName: declaration.name,
+                    newValue: value,
+                    existingDeclarations: declarations.allDeclarations
+                )
             } catch let TerminationError.recursionNotOnMatch(name) {
                 throw TypeError.unsupportedTermination(name)
             } catch let TerminationError.recursionNotOnSmallerArgument(name, _) {
@@ -370,18 +374,18 @@ public struct TypeChecker {
         let normalizedExpected = try conversion.normalize(
             instantiateHoles(in: expected),
             budget: &reductionBudget,
-            unfolding: transparentDefinitions()
+            unfolding: reductionUnfolding()
         )
         let normalizedActual = try conversion.normalize(
             instantiateHoles(in: actual),
             budget: &reductionBudget,
-            unfolding: transparentDefinitions()
+            unfolding: reductionUnfolding()
         )
         if try conversion.areDefinitionallyEqual(
             normalizedExpected,
             normalizedActual,
             budget: &reductionBudget,
-            unfolding: transparentDefinitions()
+            unfolding: reductionUnfolding()
         ) {
             return
         }
@@ -389,6 +393,7 @@ public struct TypeChecker {
             try Unifier.unify(
                 normalizedExpected,
                 normalizedActual,
+                unfolding: reductionUnfolding(),
                 context: &metavariables
             )
         } catch is UnificationError {
@@ -407,7 +412,7 @@ public struct TypeChecker {
         let normalized = try conversion.normalize(
             instantiateHoles(in: type),
             budget: &reductionBudget,
-            unfolding: transparentDefinitions()
+            unfolding: reductionUnfolding()
         )
         if case .inductive(let name, _) = normalized {
             return name
@@ -431,7 +436,7 @@ public struct TypeChecker {
             _ = try expectUniverseLevel(of: sort, inferredType: sortType)
             let declaration = Declaration(name: name, kind: .inductive, type: sort)
             if declarations.lookup(name) == nil {
-                try? declarations.add(declaration)
+                try declarations.add(declaration)
             }
             return sort
 
@@ -447,7 +452,7 @@ public struct TypeChecker {
                 type: type
             )
             if declarations.lookup(constructorName) == nil {
-                try? declarations.add(declaration)
+                try declarations.add(declaration)
             }
             return type
 
@@ -566,6 +571,22 @@ public struct TypeChecker {
         return unfolding
     }
 
+    /// δ-definitions plus registered constructor heads for match reduction and conversion.
+    private func reductionUnfolding() -> [String: Term] {
+        var unfolding = transparentDefinitions()
+        for declaration in declarations.allDeclarations where declaration.kind == .constructor {
+            guard let inductiveName = inductiveName(inConstructorType: declaration.type) else { continue }
+            let head = Term.constructor(
+                name: declaration.name,
+                inductiveName: inductiveName,
+                type: declaration.type
+            )
+            unfolding[declaration.name] = head
+            unfolding[declaration.qualifiedName] = head
+        }
+        return unfolding
+    }
+
     private func inductiveName(inConstructorType type: Term) -> String? {
         var current = type
         while case .pi(_, _, let body) = current {
@@ -622,7 +643,7 @@ public struct TypeChecker {
         let normalized = try conversion.normalize(
             instantiateHoles(in: expected),
             budget: &reductionBudget,
-            unfolding: transparentDefinitions()
+            unfolding: reductionUnfolding()
         )
         guard case .pi(_, let domain, let body) = normalized else { return nil }
         do {
