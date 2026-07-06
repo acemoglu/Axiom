@@ -17,8 +17,8 @@ public struct TerminationChecker {
         guard containsCall(to: cluster, in: value) else { return }
 
         let (parameters, body) = peelAbstractions(value)
-        guard case .match(let scrutinee, _, let cases) = body,
-              case .variable(let scrutineeName) = scrutinee else {
+        guard case .match(let scrutinee, _, let cases) = body.kind,
+              case .variable(let scrutineeName) = scrutinee.kind else {
             throw TerminationError.recursionNotOnMatch(name)
         }
         guard parameters.contains(scrutineeName) else {
@@ -130,7 +130,7 @@ public struct TerminationChecker {
         among names: Set<String>,
         into callees: inout Set<String>
     ) {
-        switch term {
+        switch term.kind {
         case .application(let function, let argument):
             if let callee = headVariable(in: function), names.contains(callee) {
                 callees.insert(callee)
@@ -157,10 +157,10 @@ public struct TerminationChecker {
 
     private func headVariable(in term: Term) -> String? {
         var current = term
-        while case .application(let function, _) = current {
+        while case .application(let function, _) = current.kind {
             current = function
         }
-        if case .variable(let name) = current {
+        if case .variable(let name) = current.kind {
             return name
         }
         return nil
@@ -219,7 +219,7 @@ public struct TerminationChecker {
     private func peelAbstractions(_ term: Term) -> (parameters: [String], body: Term) {
         var parameters: [String] = []
         var current = term
-        while case .abstraction(let param, _, let body) = current {
+        while case .abstraction(let param, _, let body) = current.kind {
             parameters.append(param)
             current = body
         }
@@ -229,7 +229,7 @@ public struct TerminationChecker {
     private func branchPatternBinders(_ branch: Term) -> Set<String> {
         var binders: Set<String> = []
         var current = branch
-        while case .abstraction(let param, _, let body) = current {
+        while case .abstraction(let param, _, let body) = current.kind {
             binders.insert(param)
             current = body
         }
@@ -237,7 +237,7 @@ public struct TerminationChecker {
     }
 
     private func containsCall(to targets: Set<String>, in term: Term) -> Bool {
-        switch term {
+        switch term.kind {
         case .variable(let variableName):
             return targets.contains(variableName)
         case .application(let function, let argument):
@@ -257,7 +257,7 @@ public struct TerminationChecker {
     }
 
     private func containsBareRecursiveReference(in term: Term, targets: Set<String>) -> Bool {
-        switch term {
+        switch term.kind {
         case .variable(let variableName):
             return targets.contains(variableName)
         case .application(let function, let argument):
@@ -282,14 +282,14 @@ public struct TerminationChecker {
     }
 
     private func isRecursiveCallHead(_ function: Term, targets: Set<String>) -> Bool {
-        if case .variable(let variableName) = function {
+        if case .variable(let variableName) = function.kind {
             return targets.contains(variableName)
         }
         var current = function
-        while case .application(let head, _) = current {
+        while case .application(let head, _) = current.kind {
             current = head
         }
-        if case .variable(let variableName) = current {
+        if case .variable(let variableName) = current.kind {
             return targets.contains(variableName)
         }
         return false
@@ -309,7 +309,7 @@ public struct TerminationChecker {
             }
             return
         }
-        switch term {
+        switch term.kind {
         case .application(let function, let argument):
             collectCallSites(function, targets: targets, into: &sites)
             collectCallSites(argument, targets: targets, into: &sites)
@@ -331,26 +331,26 @@ public struct TerminationChecker {
     }
 
     private func maximalCallArguments(in term: Term, targets: Set<String>) -> [Term]? {
-        guard case .application = term else { return nil }
+        guard case .application = term.kind else { return nil }
         var arguments: [Term] = []
         var current = term
-        while case .application(let function, let argument) = current {
+        while case .application(let function, let argument) = current.kind {
             arguments.append(argument)
             current = function
         }
-        guard case .variable(let functionName) = current, targets.contains(functionName) else {
+        guard case .variable(let functionName) = current.kind, targets.contains(functionName) else {
             return nil
         }
         return arguments.reversed()
     }
 
     private func isStrictStructuralDescent(_ term: Term, binders: Set<String>) -> Bool {
-        guard case .variable(let binderName) = term else { return false }
+        guard case .variable(let binderName) = term.kind else { return false }
         return binders.contains(binderName)
     }
 
     private func describeArgument(_ term: Term) -> String {
-        switch term {
+        switch term.kind {
         case .variable(let name):
             return name
         case .application(let function, let argument):

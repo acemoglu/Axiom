@@ -152,7 +152,7 @@ public struct DeclarationEnvironment: Equatable, Sendable {
         }
         switch declaration.kind {
         case .inductive:
-            guard case .universe(let level) = declaration.type else { return nil }
+            guard case .universe(let level) = declaration.type.kind else { return nil }
             return level
         case .definition, .constant, .theorem:
             return InductiveFamily.familyUniverseLevel(declaration.type)

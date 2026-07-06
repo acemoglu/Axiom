@@ -56,7 +56,7 @@ public struct Unifier {
     ) throws {
         if structurallyEqual(t1, t2) { return }
 
-        switch (t1, t2) {
+        switch (t1.kind, t2.kind) {
         case (.hole(let meta), _):
             try solve(meta: meta, with: t2, conversion: conversion, unfolding: unfolding, context: &context)
             return
@@ -161,7 +161,7 @@ public struct Unifier {
         context: [String: Term],
         visited: inout Set<String>
     ) -> Term {
-        switch term {
+        switch term.kind {
         case .hole(let meta):
             if visited.contains(meta) {
                 return term
@@ -224,33 +224,5 @@ public struct Unifier {
 
     private static func structurallyEqual(_ t1: Term, _ t2: Term) -> Bool {
         t1 == t2
-    }
-}
-
-// MARK: - Internal name collection for unification
-
-private extension Term {
-    var allVariableNames: Set<String> {
-        switch self {
-        case .variable(let name), .hole(let name):
-            return [name]
-        case .universe:
-            return []
-        case .pi(let param, let type, let body),
-             .abstraction(let param, let type, let body):
-            return type.allVariableNames.union(body.allVariableNames).union([param])
-        case .application(let function, let argument):
-            return function.allVariableNames.union(argument.allVariableNames)
-        case .inductive(_, let type):
-            return type.allVariableNames
-        case .constructor(_, _, let type):
-            return type.allVariableNames
-        case .match(let scrutinee, let motive, let cases):
-            return cases.values.reduce(
-                scrutinee.allVariableNames.union(motive.allVariableNames)
-            ) { partial, branch in
-                partial.union(branch.allVariableNames)
-            }
-        }
     }
 }

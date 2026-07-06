@@ -4,7 +4,7 @@ enum InductiveFamily {
     static func peelApplicationSpine(_ term: Term) -> (head: Term, arguments: [Term]) {
         var arguments: [Term] = []
         var current = term
-        while case .application(let function, let argument) = current {
+        while case .application(let function, let argument) = current.kind {
             arguments.append(argument)
             current = function
         }
@@ -13,7 +13,7 @@ enum InductiveFamily {
 
     static func codomain(of type: Term) -> Term {
         var current = type
-        while case .pi(_, _, let body) = current {
+        while case .pi(_, _, let body) = current.kind {
             current = body
         }
         return current
@@ -34,7 +34,7 @@ enum InductiveFamily {
     }
 
     static func eliminationHeadName(_ head: Term) -> String? {
-        switch head {
+        switch head.kind {
         case .inductive(let name, _), .variable(let name):
             return name
         case .constructor(_, let inductiveName, _):
@@ -46,14 +46,14 @@ enum InductiveFamily {
 
     /// *Π(_:A). … Type_i* — an indexed family sort.
     static func isIndexedFamilyType(_ type: Term) -> Bool {
-        guard case .pi = type else { return false }
+        guard case .pi = type.kind else { return false }
         return familyUniverseLevel(type) != nil
     }
 
     /// Universe level of the family result after peeling dependent binders.
     static func familyUniverseLevel(_ type: Term) -> Int? {
         let result = codomain(of: type)
-        if case .universe(let level) = result {
+        if case .universe(let level) = result.kind {
             return level
         }
         return nil

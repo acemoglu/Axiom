@@ -79,12 +79,34 @@ public struct TypeChecker {
         try typeCheck(term: term, environment: environment, expectedType: nil)
     }
 
+    /// Step 4 of the hash-consing performance model: a **type cache**. Pure inference
+    /// queries (`expectedType == nil`) on a term proven context-independent
+    /// (``Term/isGloballyCacheable``) are memoized process-wide in ``GlobalTypeCache`` —
+    /// re-checking the exact same obligation (the common "shared/repeated term" case) is
+    /// O(1) after the first check, bypassing inference, normalization, and substitution
+    /// entirely. Terms that fail the cacheability test are simply never cached; every
+    /// other guarantee below is unaffected.
     private mutating func typeCheck(
         term: Term,
         environment: [String: Term],
         expectedType: Term?
     ) throws -> Term {
-        switch term {
+        if expectedType == nil, let cached = GlobalTypeCache.shared.lookup(term) {
+            return cached
+        }
+        let result = try typeCheckUncached(term: term, environment: environment, expectedType: expectedType)
+        if expectedType == nil {
+            GlobalTypeCache.shared.store(term, type: result)
+        }
+        return result
+    }
+
+    private mutating func typeCheckUncached(
+        term: Term,
+        environment: [String: Term],
+        expectedType: Term?
+    ) throws -> Term {
+        switch term.kind {
         case .variable(let name):
             if let localType = environment[name] {
                 return instantiateHoles(in: localType)
@@ -135,7 +157,7 @@ public struct TypeChecker {
             }
             let functionType = try typeCheck(term: function, environment: environment)
             let reducedFunctionType = try normalizeForChecking(functionType)
-            guard case .pi(let param, let domain, let codomain) = reducedFunctionType else {
+            guard case .pi(let param, let domain, let codomain) = reducedFunctionType.kind else {
                 throw TypeError.notAFunction(function, functionType)
             }
             let argumentType = try typeCheck(term: argument, environment: environment)
@@ -163,7 +185,7 @@ public struct TypeChecker {
             let normalizedScrutineeType = try normalizeForChecking(scrutineeType)
             let motiveType = try typeCheck(term: motive, environment: environment)
             let normalizedMotiveType = try normalizeForChecking(motiveType)
-            guard case .pi(let motiveParam, let motiveDomain, let motiveCodomain) = normalizedMotiveType else {
+            guard case .pi(let motiveParam, let motiveDomain, let motiveCodomain) = normalizedMotiveType.kind else {
                 throw TypeError.motiveMismatch(expected: normalizedScrutineeType, actual: motiveType)
             }
             try ensureConvertible(expected: motiveDomain, actual: normalizedScrutineeType)
@@ -347,7 +369,7 @@ public struct TypeChecker {
     }
 
     private func instantiateHoles(in term: Term, visited: inout Set<String>) -> Term {
-        switch term {
+        switch term.kind {
         case .hole(let name):
             if visited.contains(name) {
                 return term
@@ -456,7 +478,7 @@ public struct TypeChecker {
     }
 
     private func expectUniverseLevel(of term: Term, inferredType: Term) throws -> Int {
-        guard case .universe(let level) = inferredType else {
+        guard case .universe(let level) = inferredType.kind else {
             throw TypeError.expectedUniverse(term, inferredType)
         }
         return level
@@ -546,7 +568,7 @@ public struct TypeChecker {
         }
         switch declaration.kind {
         case .inductive:
-            guard case .universe(let level) = declaration.type else {
+            guard case .universe(let level) = declaration.type.kind else {
                 throw TypeError.invalidInductiveSort(inductiveName, declaration.type)
             }
             return level
@@ -672,7 +694,7 @@ public struct TypeChecker {
     }
 
     private func unresolvedTermHoles(in term: Term) -> Set<String> {
-        switch term {
+        switch term.kind {
         case .hole(let name):
             return [name]
         case .variable, .universe:
@@ -772,7 +794,7 @@ public struct TypeChecker {
     }
 
     private func resolvePatternType(_ type: Term, name: String, environment: [String: Term]) -> Term {
-        if case .hole = type, let resolved = environment[name] {
+        if case .hole = type.kind, let resolved = environment[name] {
             return resolved
         }
         return type
@@ -784,7 +806,7 @@ public struct TypeChecker {
         paramType: Term
     ) throws -> Term? {
         let normalized = try normalizeForChecking(expected)
-        guard case .pi(_, let domain, let body) = normalized else { return nil }
+        guard case .pi(_, let domain, let body) = normalized.kind else { return nil }
         do {
             try ensureConvertibleOrInfer(expected: domain, actual: paramType)
         } catch {
@@ -796,7 +818,7 @@ public struct TypeChecker {
     private func peelPiParams(from type: Term) -> [(String, Term)] {
         var params: [(String, Term)] = []
         var current = type
-        while case .pi(let param, let domain, let body) = current {
+        while case .pi(let param, let domain, let body) = current.kind {
             params.append((param, domain))
             current = body
         }
@@ -806,7 +828,7 @@ public struct TypeChecker {
     private func lambdaArity(of term: Term) -> Int {
         var count = 0
         var current = term
-        while case .abstraction(_, _, let body) = current {
+        while case .abstraction(_, _, let body) = current.kind {
             count += 1
             current = body
         }
@@ -840,7 +862,7 @@ public struct TypeChecker {
         var workingMotive = motive
 
         if constructorParamNames.contains(motiveParam),
-           case .abstraction(let param, let paramType, let body) = motive,
+           case .abstraction(let param, let paramType, let body) = motive.kind,
            param == motiveParam {
             let fresh = Term.freshName(
                 avoiding: constructorParamNames
@@ -1017,7 +1039,7 @@ public struct TypeChecker {
     private func peelLambdaParams(from term: Term, expectedArity: Int) -> [(String, Term)] {
         var params: [(String, Term)] = []
         var current = term
-        while params.count < expectedArity, case .abstraction(let name, let type, let body) = current {
+        while params.count < expectedArity, case .abstraction(let name, let type, let body) = current.kind {
             params.append((name, type))
             current = body
         }
@@ -1061,7 +1083,7 @@ public struct TypeChecker {
         let normalized = try normalizeForChecking(scrutinee)
         let (head, arguments) = InductiveFamily.peelApplicationSpine(normalized)
         let resolvedHead = resolveMatchConstructorHead(head)
-        guard case .constructor(let name, _, _) = resolvedHead, name == constructorName else {
+        guard case .constructor(let name, _, _) = resolvedHead.kind, name == constructorName else {
             return nil
         }
         guard arguments.count == parameterCount else {
@@ -1071,7 +1093,7 @@ public struct TypeChecker {
     }
 
     private func resolveMatchConstructorHead(_ head: Term) -> Term {
-        if case .variable(let name) = head, let unfolded = conversionUnfolding()[name] {
+        if case .variable(let name) = head.kind, let unfolded = conversionUnfolding()[name] {
             return resolveMatchConstructorHead(unfolded)
         }
         return head
@@ -1082,7 +1104,7 @@ public struct TypeChecker {
         _ motiveInstance: Term,
         environment: [String: Term]
     ) throws -> Term {
-        switch motiveInstance {
+        switch motiveInstance.kind {
         case .universe, .pi, .application:
             return motiveInstance
         case .variable(let name):

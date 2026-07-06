@@ -371,7 +371,7 @@ final class InductiveTypesTests: XCTestCase {
         try env.closeInductive("List")
 
         let checker = TypeChecker(declarations: env)
-        guard case .constructor(let name, _, _) = checker.conversionUnfolding()["cons"] else {
+        guard case .constructor(let name, _, _) = checker.conversionUnfolding()["cons"]?.kind else {
             return XCTFail("Expected cons to map to a constructor head in conversionUnfolding()")
         }
         XCTAssertEqual(name, "cons")

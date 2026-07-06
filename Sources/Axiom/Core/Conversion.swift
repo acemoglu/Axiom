@@ -54,13 +54,13 @@ public struct Conversion {
         unfolding: [String: Term]
     ) throws -> Term {
         try budget.consume()
-        if case .variable(let name) = term, let value = unfolding[name] {
+        if case .variable(let name) = term.kind, let value = unfolding[name] {
             return try weakHeadNormalize(value, budget: &budget, unfolding: unfolding)
         }
-        switch term {
+        switch term.kind {
         case .application(let function, let argument):
             let reducedFunction = try weakHeadNormalize(function, budget: &budget, unfolding: unfolding)
-            if case .abstraction(let param, _, let body) = reducedFunction {
+            if case .abstraction(let param, _, let body) = reducedFunction.kind {
                 return try weakHeadNormalize(
                     body.substituting(name: param, with: argument),
                     budget: &budget,
@@ -81,7 +81,14 @@ public struct Conversion {
 
     private func alphaEquivalent(_ t1: Term, _ t2: Term) -> Bool {
         func compare(_ lhs: Term, _ rhs: Term, mapping: inout [String: String]) -> Bool {
-            switch (lhs, rhs) {
+            // Fast path: hash-consing means structurally-identical subterms are literally
+            // the same instance. If they're pointer-equal *and* none of this subterm's free
+            // variables have been renamed by an enclosing binder mismatch, it is trivially
+            // alpha-equivalent to itself — bypass the deep walk entirely.
+            if lhs === rhs, lhs.freeVariables.allSatisfy({ (mapping[$0] ?? $0) == $0 }) {
+                return true
+            }
+            switch (lhs.kind, rhs.kind) {
             case (.variable(let l), .variable(let r)):
                 if let mapped = mapping[l] { return mapped == r }
                 return l == r

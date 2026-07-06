@@ -43,7 +43,7 @@ public struct PositivityChecker {
     /// Each argument type `Aᵢ` must still be strictly positive in `I`.
     private func checkConstructorType(_ type: Term, inductiveName: String) throws {
         var current = type
-        while case .pi(_, let domain, let body) = current {
+        while case .pi(_, let domain, let body) = current.kind {
             try checkStrictlyPositive(domain, inductiveName: inductiveName)
             current = body
         }
@@ -63,7 +63,7 @@ public struct PositivityChecker {
     private func checkStrictlyPositive(_ type: Term, inductiveName: String) throws {
         guard occurs(inductiveName, in: type) else { return }
 
-        switch type {
+        switch type.kind {
         case .pi(_, let domain, let body):
             if occurs(inductiveName, in: domain) {
                 throw PositivityError.negativeOccurrence(inductive: inductiveName, in: domain)
@@ -94,7 +94,7 @@ public struct PositivityChecker {
         if refersToInductive(term, inductiveName: inductiveName) {
             return true
         }
-        switch term {
+        switch term.kind {
         case .variable, .inductive, .constructor, .universe, .hole:
             return false
         case .application(let function, let argument):
@@ -113,7 +113,7 @@ public struct PositivityChecker {
     private func resolveHead(_ term: Term) -> Term {
         var current = term
         var visited: Set<String> = []
-        while case .variable(let name) = current,
+        while case .variable(let name) = current.kind,
               !visited.contains(name),
               let next = unfolding[name] {
             visited.insert(name)
@@ -123,7 +123,7 @@ public struct PositivityChecker {
     }
 
     private func refersToInductive(_ term: Term, inductiveName: String) -> Bool {
-        switch resolveHead(term) {
+        switch resolveHead(term).kind {
         case .variable(let name):
             return name == inductiveName
         case .inductive(let name, let sort):
@@ -138,7 +138,7 @@ public struct PositivityChecker {
     private func peelSpine(_ term: Term) -> (head: Term, arguments: [Term]) {
         var arguments: [Term] = []
         var current = term
-        while case .application(let function, let argument) = current {
+        while case .application(let function, let argument) = current.kind {
             arguments.append(argument)
             current = function
         }
@@ -152,7 +152,7 @@ public struct PositivityChecker {
     // MARK: - Hole hygiene
 
     private func rejectForeignHoles(_ term: Term, inductiveName: String) throws {
-        switch term {
+        switch term.kind {
         case .hole(let name):
             throw PositivityError.unresolvedHole(name, inductive: inductiveName, in: term)
         case .variable, .universe:

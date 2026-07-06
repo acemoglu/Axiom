@@ -17,7 +17,7 @@ public struct UniverseChecker {
         inductiveLevel: Int
     ) throws {
         var current = type
-        while case .pi(_, let domain, let body) = current {
+        while case .pi(_, let domain, let body) = current.kind {
             if universeLevel(of: domain) == inductiveLevel {
                 throw UniversePolicyError.impredicativeQuantification(
                     inductive: inductiveName,
@@ -47,7 +47,7 @@ public struct UniverseChecker {
         inductiveName: String,
         inductiveLevel: Int
     ) throws {
-        switch type {
+        switch type.kind {
         case .pi(_, let domain, let body):
             if universeLevel(of: domain) == inductiveLevel {
                 throw UniversePolicyError.impredicativeQuantification(
@@ -130,7 +130,7 @@ public struct UniverseChecker {
     }
 
     private func universeLevel(of term: Term) -> Int? {
-        if case .universe(let level) = term {
+        if case .universe(let level) = term.kind {
             return level
         }
         return nil
@@ -139,7 +139,7 @@ public struct UniverseChecker {
     private func peelSpine(_ term: Term) -> (head: Term, arguments: [Term]) {
         var arguments: [Term] = []
         var current = term
-        while case .application(let function, let argument) = current {
+        while case .application(let function, let argument) = current.kind {
             arguments.append(argument)
             current = function
         }
