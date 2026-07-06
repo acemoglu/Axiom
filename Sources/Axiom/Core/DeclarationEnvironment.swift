@@ -67,13 +67,28 @@ public struct DeclarationEnvironment: Equatable, Sendable {
 
     public init() {}
 
-    /// Stores a declaration that has already been validated by ``TypeChecker``.
-    mutating func insert(_ declaration: Declaration) throws {
+    /// Stores a declaration that has already been validated by ``TypeChecker/checkDeclaration``.
+    private mutating func insert(_ declaration: Declaration) throws {
         if declarationsByName[declaration.name] != nil {
             throw DeclarationEnvironmentError.duplicateDeclaration(declaration.name)
         }
         declarationsByName[declaration.name] = declaration
         qualifiedToName[declaration.qualifiedName] = declaration.name
+    }
+
+    /// Commits a fully checked declaration into the environment. Called only from ``TypeChecker``.
+    ///
+    /// Replaces an existing type-only declaration with the same name and kind when completing
+    /// a forward declaration.
+    mutating func commitValidatedDeclaration(_ declaration: Declaration) throws {
+        if let existing = declarationsByName[declaration.name] {
+            guard existing.value == nil, existing.kind == declaration.kind else {
+                throw DeclarationEnvironmentError.duplicateDeclaration(declaration.name)
+            }
+            declarationsByName[declaration.name] = declaration
+            return
+        }
+        try insert(declaration)
     }
 
     /// Registers inductive/constructor declarations and type-only constants.

@@ -50,7 +50,12 @@ public struct TerminationChecker {
         existingDeclarations: [Declaration]
     ) throws {
         let definable = existingDeclarations.filter {
-            ($0.kind == .definition || $0.kind == .theorem) && $0.value != nil
+            switch $0.kind {
+            case .definition, .theorem, .constant:
+                return $0.value != nil
+            case .axiom, .inductive, .constructor:
+                return false
+            }
         }
         var names = Set(definable.map(\.name))
         names.insert(newName)

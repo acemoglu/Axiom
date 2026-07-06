@@ -165,8 +165,10 @@ final class TerminationTests: XCTestCase {
         }
 
         var env = try natEnvironment()
-        try env.insert(gDeclaration)
+        try env.add(Declaration(name: "f", kind: .definition, type: natFun))
         var checker = TypeChecker(declarations: env)
+        try checker.checkDeclaration(gDeclaration)
+        checker = TypeChecker(declarations: checker.declarations)
         XCTAssertThrowsError(
             try checker.checkDeclaration(
                 Declaration(name: "f", kind: .definition, type: natFun, value: fBody)
@@ -250,9 +252,11 @@ final class TerminationTests: XCTestCase {
 
         var env = try natEnvironment()
         let gDeclaration = Declaration(name: "g", kind: .definition, type: natFun, value: gBody)
-        try env.insert(gDeclaration)
-
+        try env.add(Declaration(name: "f", kind: .definition, type: natFun))
         var checker = TypeChecker(declarations: env)
+        try checker.checkDeclaration(gDeclaration)
+        checker = TypeChecker(declarations: checker.declarations)
+
         XCTAssertThrowsError(
             try checker.checkDeclaration(
                 Declaration(name: "f", kind: .definition, type: natFun, value: fBody)

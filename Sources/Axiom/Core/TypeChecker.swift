@@ -47,6 +47,9 @@ public enum TypeError: Error, Equatable, Sendable {
 
     /// Constructor branch indices do not unify with the scrutinee's indices.
     case indexMismatch(constructor: String, expected: Term, actual: Term)
+
+    /// Normalization exceeded the reduction fuel budget while checking this term.
+    case reductionOutOfBounds(Term)
 }
 
 // MARK: - Type checker
@@ -451,11 +454,15 @@ public struct TypeChecker {
     }
 
     private mutating func normalizedForComparison(_ term: Term) throws -> Term {
-        try conversion.normalize(
-            instantiateHoles(in: term),
-            budget: &reductionBudget,
-            unfolding: conversionUnfolding()
-        )
+        do {
+            return try conversion.normalize(
+                instantiateHoles(in: term),
+                budget: &reductionBudget,
+                unfolding: conversionUnfolding()
+            )
+        } catch ReductionError.outOfFuel {
+            throw TypeError.reductionOutOfBounds(term)
+        }
     }
 
     private func expectUniverseLevel(of term: Term, inferredType: Term) throws -> Int {
@@ -629,7 +636,7 @@ public struct TypeChecker {
 
     private mutating func registerDeclaration(_ declaration: Declaration) throws {
         do {
-            try declarations.insert(declaration)
+            try declarations.commitValidatedDeclaration(declaration)
         } catch let DeclarationEnvironmentError.inductiveAlreadyClosed(name) {
             throw TypeError.inductiveAlreadyClosed(name)
         } catch let DeclarationEnvironmentError.missingInductiveDeclaration(name) {
