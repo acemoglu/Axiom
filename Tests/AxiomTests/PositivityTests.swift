@@ -105,4 +105,32 @@ final class PositivityTests: XCTestCase {
             }
         }
     }
+
+    func testRejectsMutualInductiveNegativeCrossOccurrence() throws {
+        let a = Term.variable("A")
+        let b = Term.variable("B")
+        let mkAType = Term.pi(
+            param: "f",
+            type: Term.pi(param: "x", type: b, body: a),
+            body: a
+        )
+        let mkBType = Term.pi(
+            param: "f",
+            type: Term.pi(param: "x", type: a, body: b),
+            body: b
+        )
+
+        var env = DeclarationEnvironment()
+        try env.add(Declaration(name: "A", kind: .inductive, type: .universe(0)))
+        try env.add(Declaration(name: "B", kind: .inductive, type: .universe(0)))
+        try env.add(Declaration(name: "mkA", kind: .constructor, type: mkAType))
+        try env.add(Declaration(name: "mkB", kind: .constructor, type: mkBType))
+
+        XCTAssertThrowsError(try env.closeInductive(mutualBlock: ["A", "B"])) { error in
+            guard case .negativeOccurrence(let inductive, _) = error as? PositivityError else {
+                return XCTFail("Expected negativeOccurrence, got \(error)")
+            }
+            XCTAssertTrue(inductive == "A" || inductive == "B")
+        }
+    }
 }

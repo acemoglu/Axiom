@@ -13,11 +13,19 @@ public enum PositivityError: Error, Equatable, Sendable {
 public struct PositivityChecker {
     public init() {}
 
-    /// Verifies strict positivity for every constructor type.
+    /// Verifies strict positivity for every constructor type against a single inductive.
     public func check(inductiveName: String, constructorTypes: [Term]) throws {
+        try check(mutualBlock: [inductiveName], constructorTypes: constructorTypes)
+    }
+
+    /// Verifies every constructor type is strictly positive with respect to every inductive in the block.
+    public func check(mutualBlock: Set<String>, constructorTypes: [Term]) throws {
+        guard !mutualBlock.isEmpty else { return }
         for type in constructorTypes {
-            try rejectForeignHoles(type, inductiveName: inductiveName)
-            try checkConstructorType(type, inductiveName: inductiveName)
+            for inductiveName in mutualBlock.sorted() {
+                try rejectForeignHoles(type, inductiveName: inductiveName)
+                try checkConstructorType(type, inductiveName: inductiveName)
+            }
         }
     }
 

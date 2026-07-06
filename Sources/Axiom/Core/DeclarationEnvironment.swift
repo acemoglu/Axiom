@@ -165,34 +165,61 @@ public struct DeclarationEnvironment: Equatable, Sendable {
         closedInductives.contains(inductiveName)
     }
 
-    /// Finalizes an inductive or indexed-family block, then marks it closed.
+    /// Finalizes a single inductive or indexed-family block, then marks it closed.
     public mutating func closeInductive(_ inductiveName: String) throws {
-        guard let declaration = declarationsByName[inductiveName],
-              isEliminableFamily(declaration) else {
-            throw DeclarationEnvironmentError.unknownInductive(inductiveName)
+        try closeInductive(mutualBlock: [inductiveName])
+    }
+
+    /// Finalizes a mutual inductive block: cross-checks every constructor against every member.
+    public mutating func closeInductive(mutualBlock: Set<String>) throws {
+        guard !mutualBlock.isEmpty else { return }
+
+        for inductiveName in mutualBlock {
+            guard let declaration = declarationsByName[inductiveName],
+                  isEliminableFamily(declaration) else {
+                throw DeclarationEnvironmentError.unknownInductive(inductiveName)
+            }
+            guard inductiveLevel(for: inductiveName) != nil else {
+                throw DeclarationEnvironmentError.invalidInductiveSort(
+                    inductiveName,
+                    declarationsByName[inductiveName]!.type
+                )
+            }
         }
-        guard !closedInductives.contains(inductiveName) else {
-            return
+
+        let unclosed = mutualBlock.subtracting(closedInductives)
+        guard !unclosed.isEmpty else { return }
+
+        if unclosed.count != mutualBlock.count {
+            let alreadyClosed = mutualBlock.intersection(closedInductives).sorted().joined(separator: ", ")
+            throw DeclarationEnvironmentError.inductiveAlreadyClosed(alreadyClosed)
         }
-        let constructorTypes = constructors(for: inductiveName).map(\.type)
-        guard let inductiveLevel = inductiveLevel(for: inductiveName) else {
-            throw DeclarationEnvironmentError.invalidInductiveSort(
-                inductiveName,
-                declarationsByName[inductiveName]!.type
-            )
-        }
+
+        let constructorTypes = mutualBlock
+            .sorted()
+            .flatMap { constructors(for: $0).map(\.type) }
         try PositivityChecker().check(
-            inductiveName: inductiveName,
+            mutualBlock: mutualBlock,
             constructorTypes: constructorTypes
         )
-        for constructorType in constructorTypes {
-            try UniverseChecker().checkConstructorType(
-                constructorType,
-                inductiveName: inductiveName,
-                inductiveLevel: inductiveLevel
-            )
+
+        for inductiveName in mutualBlock.sorted() {
+            guard let inductiveLevel = inductiveLevel(for: inductiveName) else {
+                throw DeclarationEnvironmentError.invalidInductiveSort(
+                    inductiveName,
+                    declarationsByName[inductiveName]!.type
+                )
+            }
+            for constructorType in constructors(for: inductiveName).map(\.type) {
+                try UniverseChecker().checkConstructorType(
+                    constructorType,
+                    inductiveName: inductiveName,
+                    inductiveLevel: inductiveLevel
+                )
+            }
         }
-        closedInductives.insert(inductiveName)
+
+        closedInductives.formUnion(mutualBlock)
     }
 
     public func constructors(for parentInductive: String) -> [Declaration] {

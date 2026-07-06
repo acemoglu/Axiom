@@ -592,10 +592,17 @@ public struct TypeChecker {
     /// Re-validates strict positivity for every constructor, marks the inductive closed,
     /// and enables ``Term/match`` elimination on that type.
     public mutating func closeInductive(_ inductiveName: String) throws {
+        try closeInductive(mutualBlock: [inductiveName])
+    }
+
+    /// Closes a mutual inductive block after all constructors are registered.
+    public mutating func closeInductive(mutualBlock: Set<String>) throws {
         do {
-            try declarations.closeInductive(inductiveName)
+            try declarations.closeInductive(mutualBlock: mutualBlock)
         } catch let DeclarationEnvironmentError.unknownInductive(name) {
             throw TypeError.unknownInductive(name)
+        } catch let DeclarationEnvironmentError.inductiveAlreadyClosed(name) {
+            throw TypeError.inductiveAlreadyClosed(name)
         } catch let DeclarationEnvironmentError.invalidInductiveSort(name, sort) {
             throw TypeError.invalidInductiveSort(name, sort)
         } catch let PositivityError.negativeOccurrence(inductive, occurrence) {
