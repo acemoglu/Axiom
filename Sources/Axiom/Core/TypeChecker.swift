@@ -151,9 +151,6 @@ public struct TypeChecker {
             )
 
         case .match(let scrutinee, let motive, let cases):
-            guard !cases.isEmpty else {
-                throw TypeError.emptyMatch
-            }
             let scrutineeType = try typeCheck(
                 term: scrutinee,
                 environment: environment,
@@ -182,11 +179,23 @@ public struct TypeChecker {
             }
             try ensureConvertible(expected: motiveDomain, actual: normalizedScrutineeType)
             _ = try expectUniverseLevel(of: motive, inferredType: motiveCodomain)
-            for missing in allConstructors(for: inductiveName) where cases[missing] == nil {
+            let constructorNames = allConstructors(for: inductiveName)
+            if constructorNames.isEmpty {
+                for spuriousCase in cases.keys.sorted() {
+                    throw TypeError.unknownMatchConstructor(spuriousCase)
+                }
+                return instantiateHoles(
+                    in: Term.application(function: motive, argument: scrutinee)
+                )
+            }
+            guard !cases.isEmpty else {
+                throw TypeError.emptyMatch
+            }
+            for missing in constructorNames where cases[missing] == nil {
                 throw TypeError.missingMatchCase(missing)
             }
-            let constructorNames = cases.keys.sorted()
-            for constructorName in constructorNames {
+            let caseNames = cases.keys.sorted()
+            for constructorName in caseNames {
                 guard let branch = cases[constructorName] else { continue }
                 guard let constructor = lookupMatchConstructor(
                     constructorName,

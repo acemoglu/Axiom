@@ -499,6 +499,96 @@ final class InductiveTypesTests: XCTestCase {
         XCTAssertTrue(try Conversion().areDefinitionallyEqual(inferred, witness))
     }
 
+    func testAbsurdEliminationOnFalse() throws {
+        var env = DeclarationEnvironment()
+        try env.add(Declaration(name: "False", kind: .inductive, type: .universe(0)))
+        try env.closeInductive("False")
+
+        let falseType = Term.inductive(name: "False", type: .universe(0))
+        let hypothesis = Term.variable("f")
+        let motive = Term.constantMotive(scrutineeType: falseType, returnType: .universe(0))
+        let absurdMatch = Term.match(scrutinee: hypothesis, motive: motive, cases: [:])
+
+        let inferred = try TypeChecker.typeCheck(
+            term: absurdMatch,
+            declarations: env,
+            environment: ["f": falseType]
+        )
+        let expected = Term.application(function: motive, argument: hypothesis)
+        XCTAssertTrue(try Conversion().areDefinitionallyEqual(inferred, expected))
+    }
+
+    func testAbsurdEliminationDerivesArbitraryType() throws {
+        var env = DeclarationEnvironment()
+        try env.add(Declaration(name: "False", kind: .inductive, type: .universe(0)))
+        try env.closeInductive("False")
+
+        let falseType = Term.inductive(name: "False", type: .universe(0))
+        let motive = Term.abstraction(param: "_", type: falseType, body: nat)
+        let absurdMatch = Term.match(scrutinee: .variable("f"), motive: motive, cases: [:])
+
+        let inferred = try TypeChecker.typeCheck(
+            term: absurdMatch,
+            declarations: env,
+            environment: ["f": falseType]
+        )
+        XCTAssertTrue(try Conversion().areDefinitionallyEqual(inferred, nat))
+    }
+
+    func testAbsurdEliminationRejectsSpuriousCase() throws {
+        var env = DeclarationEnvironment()
+        try env.add(Declaration(name: "False", kind: .inductive, type: .universe(0)))
+        try env.closeInductive("False")
+
+        let falseType = Term.inductive(name: "False", type: .universe(0))
+        let motive = Term.constantMotive(scrutineeType: falseType, returnType: .universe(0))
+        let absurdMatch = Term.match(
+            scrutinee: .variable("f"),
+            motive: motive,
+            cases: ["bogus": .universe(0)]
+        )
+
+        XCTAssertThrowsError(
+            try TypeChecker.typeCheck(
+                term: absurdMatch,
+                declarations: env,
+                environment: ["f": falseType]
+            )
+        ) { error in
+            XCTAssertEqual(error as? TypeError, .unknownMatchConstructor("bogus"))
+        }
+    }
+
+    func testEmptyMatchStillRejectedForNonemptyInductive() throws {
+        let motive = Term.constantMotive(scrutineeType: nat, returnType: .universe(0))
+        let emptyMatch = Term.match(scrutinee: zero, motive: motive, cases: [:])
+
+        XCTAssertThrowsError(
+            try TypeChecker.typeCheck(term: emptyMatch, declarations: try natEnvironment())
+        ) { error in
+            XCTAssertEqual(error as? TypeError, .emptyMatch)
+        }
+    }
+
+    func testAbsurdEliminationRequiresClosedInductive() throws {
+        var env = DeclarationEnvironment()
+        try env.add(Declaration(name: "False", kind: .inductive, type: .universe(0)))
+
+        let falseType = Term.inductive(name: "False", type: .universe(0))
+        let motive = Term.constantMotive(scrutineeType: falseType, returnType: .universe(0))
+        let absurdMatch = Term.match(scrutinee: .variable("f"), motive: motive, cases: [:])
+
+        XCTAssertThrowsError(
+            try TypeChecker.typeCheck(
+                term: absurdMatch,
+                declarations: env,
+                environment: ["f": falseType]
+            )
+        ) { error in
+            XCTAssertEqual(error as? TypeError, .inductiveNotClosed("False"))
+        }
+    }
+
     func testCannotAddConstructorAfterClose() throws {
         var env = DeclarationEnvironment()
         try env.add(Declaration(name: "Nat", kind: .inductive, type: .universe(0)))
