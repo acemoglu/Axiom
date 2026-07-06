@@ -106,6 +106,30 @@ final class PositivityTests: XCTestCase {
         }
     }
 
+    func testRejectsNegativeOccurrenceThroughDefinitionAlias() throws {
+        var checker = TypeChecker()
+        try checker.checkDeclaration(Declaration(name: "Bad", kind: .inductive, type: .universe(0)))
+        let bad = Term.variable("Bad")
+        try checker.checkDeclaration(Declaration(
+            name: "MyBad",
+            kind: .definition,
+            type: .universe(0),
+            value: bad
+        ))
+        let myBad = Term.variable("MyBad")
+        let negativeArg = Term.pi(param: "x", type: myBad, body: myBad)
+        let evilType = Term.pi(param: "f", type: negativeArg, body: bad)
+
+        XCTAssertThrowsError(
+            try checker.checkDeclaration(Declaration(name: "evil", kind: .constructor, type: evilType))
+        ) { error in
+            guard case .nonStrictlyPositive(let inductive, _) = error as? TypeError else {
+                return XCTFail("Expected nonStrictlyPositive, got \(error)")
+            }
+            XCTAssertEqual(inductive, "Bad")
+        }
+    }
+
     func testRejectsMutualInductiveNegativeCrossOccurrence() throws {
         let a = Term.variable("A")
         let b = Term.variable("B")

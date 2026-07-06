@@ -11,7 +11,12 @@ public enum PositivityError: Error, Equatable, Sendable {
 }
 
 public struct PositivityChecker {
-    public init() {}
+    /// Transparent δ-definitions used to resolve aliases before polarity checking.
+    private let unfolding: [String: Term]
+
+    public init(unfolding: [String: Term] = [:]) {
+        self.unfolding = unfolding
+    }
 
     /// Verifies strict positivity for every constructor type against a single inductive.
     public func check(inductiveName: String, constructorTypes: [Term]) throws {
@@ -84,14 +89,14 @@ public struct PositivityChecker {
 
     // MARK: - Occurrence helpers
 
+    /// Whether `term` mentions `inductiveName`, unfolding transparent aliases first.
     private func occurs(_ inductiveName: String, in term: Term) -> Bool {
+        if refersToInductive(term, inductiveName: inductiveName) {
+            return true
+        }
         switch term {
-        case .variable(let name):
-            return name == inductiveName
-        case .inductive(let name, let sort):
-            return name == inductiveName || occurs(inductiveName, in: sort)
-        case .constructor(_, let parent, let constructorType):
-            return parent == inductiveName || occurs(inductiveName, in: constructorType)
+        case .variable, .inductive, .constructor, .universe, .hole:
+            return false
         case .application(let function, let argument):
             return occurs(inductiveName, in: function) || occurs(inductiveName, in: argument)
         case .pi(_, let domain, let body),
@@ -101,7 +106,31 @@ public struct PositivityChecker {
             return occurs(inductiveName, in: scrutinee)
                 || occurs(inductiveName, in: motive)
                 || cases.values.contains { occurs(inductiveName, in: $0) }
-        case .hole, .universe:
+        }
+    }
+
+    /// Resolves variable aliases through ``unfolding`` (cycle-safe).
+    private func resolveHead(_ term: Term) -> Term {
+        var current = term
+        var visited: Set<String> = []
+        while case .variable(let name) = current,
+              !visited.contains(name),
+              let next = unfolding[name] {
+            visited.insert(name)
+            current = next
+        }
+        return current
+    }
+
+    private func refersToInductive(_ term: Term, inductiveName: String) -> Bool {
+        switch resolveHead(term) {
+        case .variable(let name):
+            return name == inductiveName
+        case .inductive(let name, let sort):
+            return name == inductiveName || occurs(inductiveName, in: sort)
+        case .constructor(_, let parent, let constructorType):
+            return parent == inductiveName || occurs(inductiveName, in: constructorType)
+        default:
             return false
         }
     }
@@ -117,16 +146,7 @@ public struct PositivityChecker {
     }
 
     private func isInductiveHead(_ head: Term, inductiveName: String) -> Bool {
-        switch head {
-        case .variable(let name):
-            return name == inductiveName
-        case .inductive(let name, _):
-            return name == inductiveName
-        case .constructor(_, let parent, _):
-            return parent == inductiveName
-        default:
-            return false
-        }
+        refersToInductive(head, inductiveName: inductiveName)
     }
 
     // MARK: - Hole hygiene

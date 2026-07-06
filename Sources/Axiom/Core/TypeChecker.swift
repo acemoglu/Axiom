@@ -496,7 +496,7 @@ public struct TypeChecker {
         constructorType: Term
     ) throws {
         do {
-            try PositivityChecker().check(
+            try PositivityChecker(unfolding: typeUnfolding()).check(
                 inductiveName: inductiveName,
                 constructorTypes: [constructorType]
             )
@@ -560,7 +560,7 @@ public struct TypeChecker {
     public func checkInductivePositivity(inductiveName: String) throws {
         let constructorTypes = declarations.constructors(for: inductiveName).map(\.type)
         do {
-            try PositivityChecker().check(
+            try PositivityChecker(unfolding: typeUnfolding()).check(
                 inductiveName: inductiveName,
                 constructorTypes: constructorTypes
             )

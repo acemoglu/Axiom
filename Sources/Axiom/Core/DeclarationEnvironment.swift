@@ -102,7 +102,7 @@ public struct DeclarationEnvironment: Equatable, Sendable {
                 declarationsByName[inductiveName]!.type
             )
         }
-        try PositivityChecker().check(
+        try PositivityChecker(unfolding: positivityUnfolding()).check(
             inductiveName: inductiveName,
             constructorTypes: [constructorType]
         )
@@ -130,6 +130,25 @@ public struct DeclarationEnvironment: Equatable, Sendable {
 
     private func inductiveName(inConstructorType type: Term) -> String? {
         InductiveFamily.codomainHead(type)?.name
+    }
+
+    /// Transparent δ-definitions for resolving aliases during strict-positivity checks.
+    private func positivityUnfolding() -> [String: Term] {
+        var unfolding: [String: Term] = [:]
+        for declaration in allDeclarations {
+            guard let value = declaration.value else { continue }
+            switch declaration.kind {
+            case .definition, .theorem, .constant:
+                if InductiveFamily.isIndexedFamilyType(declaration.type) {
+                    continue
+                }
+                unfolding[declaration.name] = value
+                unfolding[declaration.qualifiedName] = value
+            case .axiom, .inductive, .constructor:
+                break
+            }
+        }
+        return unfolding
     }
 
     private func isEliminableFamily(_ declaration: Declaration) -> Bool {
@@ -198,7 +217,7 @@ public struct DeclarationEnvironment: Equatable, Sendable {
         let constructorTypes = mutualBlock
             .sorted()
             .flatMap { constructors(for: $0).map(\.type) }
-        try PositivityChecker().check(
+        try PositivityChecker(unfolding: positivityUnfolding()).check(
             mutualBlock: mutualBlock,
             constructorTypes: constructorTypes
         )
