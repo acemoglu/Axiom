@@ -206,14 +206,7 @@ final class InductiveTypesTests: XCTestCase {
     func testDependentMatchAppliesMotiveToScrutinee() throws {
         var env = try natEnvironment()
         let vecType = Term.pi(param: "n", type: nat, body: Term.universe(0))
-        try env.add(
-            Declaration(
-                name: "Vec",
-                kind: .definition,
-                type: vecType,
-                value: Term.abstraction(param: "_", type: nat, body: Term.universe(0))
-            )
-        )
+        try env.add(Declaration(name: "Vec", kind: .constant, type: vecType))
 
         let returnType = Term.universe(0)
         let witness = Term.variable("w")
@@ -250,14 +243,7 @@ final class InductiveTypesTests: XCTestCase {
     func testDependentMotiveWithIndexedFamilyCodomain() throws {
         var env = try natEnvironment()
         let vecType = Term.pi(param: "n", type: nat, body: Term.universe(0))
-        try env.add(
-            Declaration(
-                name: "Vec",
-                kind: .definition,
-                type: vecType,
-                value: Term.abstraction(param: "_", type: nat, body: Term.universe(0))
-            )
-        )
+        try env.add(Declaration(name: "Vec", kind: .constant, type: vecType))
         try env.add(Declaration(name: "False", kind: .inductive, type: .universe(0)))
         try env.closeInductive("False")
 
@@ -422,14 +408,7 @@ final class InductiveTypesTests: XCTestCase {
     func testDependentMatchRejectsWrongZeroBranch() throws {
         var env = try natEnvironment()
         let vecType = Term.pi(param: "n", type: nat, body: Term.universe(0))
-        try env.add(
-            Declaration(
-                name: "Vec",
-                kind: .definition,
-                type: vecType,
-                value: Term.abstraction(param: "_", type: nat, body: Term.universe(0))
-            )
-        )
+        try env.add(Declaration(name: "Vec", kind: .constant, type: vecType))
 
         let P = Term.abstraction(
             param: "i",
@@ -542,14 +521,109 @@ final class InductiveTypesTests: XCTestCase {
     func testIndexedFamilyMatchElimination() throws {
         let vecType = Term.pi(param: "n", type: nat, body: Term.universe(0))
         var env = try natEnvironment()
-        try env.add(
-            Declaration(
-                name: "Vec",
-                kind: .definition,
-                type: vecType,
-                value: Term.abstraction(param: "_", type: nat, body: Term.universe(0))
+        try env.add(Declaration(name: "Vec", kind: .constant, type: vecType))
+
+        let vecZero = Term.application(function: .variable("Vec"), argument: .variable("zero"))
+        try env.add(Declaration(name: "vnil", kind: .constructor, type: vecZero))
+        try env.closeInductive("Vec")
+
+        let witness = Term.variable("w")
+        let motive = Term.constantMotive(scrutineeType: vecZero, returnType: witness)
+        let matchTerm = Term.match(
+            scrutinee: .variable("vnil"),
+            motive: motive,
+            cases: ["vnil": witness]
+        )
+
+        let inferred = try TypeChecker.typeCheck(
+            term: matchTerm,
+            declarations: env,
+            environment: [
+                "Vec": vecType,
+                "zero": nat,
+                "vnil": vecZero,
+                "w": Term.universe(0),
+            ]
+        )
+        XCTAssertTrue(try Conversion().areDefinitionallyEqual(inferred, witness))
+    }
+
+    func testIndexedFamilyVConsMatchSucceeds() throws {
+        let vecType = Term.pi(param: "n", type: nat, body: Term.universe(0))
+        var env = try natEnvironment()
+        try env.add(Declaration(name: "Vec", kind: .constant, type: vecType))
+
+        let vecN = Term.application(function: .variable("Vec"), argument: .variable("n"))
+        let vecZero = Term.application(function: .variable("Vec"), argument: .variable("zero"))
+        let vecSuccN = Term.application(
+            function: .variable("Vec"),
+            argument: Term.application(function: .variable("succ"), argument: .variable("n"))
+        )
+        let vconsType = Term.pi(
+            param: "n",
+            type: nat,
+            body: Term.pi(
+                param: "h",
+                type: nat,
+                body: Term.pi(param: "t", type: vecN, body: vecSuccN)
             )
         )
+        try env.add(Declaration(name: "vcons", kind: .constructor, type: vconsType))
+        try env.closeInductive("Vec")
+
+        let h = Term.variable("h")
+        let t = Term.variable("t")
+        let witness = Term.variable("w")
+        let vecSuccZero = Term.application(
+            function: .variable("Vec"),
+            argument: Term.application(function: .variable("succ"), argument: .variable("zero"))
+        )
+        let motive = Term.constantMotive(scrutineeType: vecSuccZero, returnType: witness)
+        let scrutinee = Term.application(
+            function: Term.application(
+                function: Term.application(function: .variable("vcons"), argument: .variable("zero")),
+                argument: h
+            ),
+            argument: t
+        )
+        let matchTerm = Term.match(
+            scrutinee: scrutinee,
+            motive: motive,
+            cases: [
+                "vcons": Term.abstraction(
+                    param: "n",
+                    type: nat,
+                    body: Term.abstraction(
+                        param: "h",
+                        type: nat,
+                        body: Term.abstraction(param: "t", type: vecZero, body: witness)
+                    )
+                ),
+            ]
+        )
+
+        let inferred = try TypeChecker.typeCheck(
+            term: matchTerm,
+            declarations: env,
+            environment: [
+                "Vec": vecType,
+                "zero": nat,
+                "succ": succType,
+                "vcons": vconsType,
+                "h": nat,
+                "t": vecZero,
+                "w": Term.universe(0),
+            ]
+        )
+        XCTAssertTrue(try Conversion().areDefinitionallyEqual(inferred, witness))
+    }
+
+    func testMatchRejectsIndexedBranchIndexMismatch() throws {
+        let vecType = Term.pi(param: "n", type: nat, body: Term.universe(0))
+        var env = try natEnvironment()
+        try env.add(Declaration(name: "Vec", kind: .constant, type: vecType))
+        try env.add(Declaration(name: "False", kind: .inductive, type: .universe(0)))
+        try env.closeInductive("False")
 
         let vecZero = Term.application(function: .variable("Vec"), argument: .variable("zero"))
         let vecN = Term.application(function: .variable("Vec"), argument: .variable("n"))
@@ -577,7 +651,72 @@ final class InductiveTypesTests: XCTestCase {
 
         let h = Term.variable("h")
         let t = Term.variable("t")
-        let witness = Term.variable("w")
+        let falseType = Term.variable("False")
+        let vecSuccZero = Term.application(
+            function: .variable("Vec"),
+            argument: Term.application(function: .variable("succ"), argument: .variable("zero"))
+        )
+        let motive = Term.constantMotive(scrutineeType: vecSuccZero, returnType: falseType)
+        let scrutinee = Term.application(
+            function: Term.application(
+                function: Term.application(function: .variable("vcons"), argument: .variable("zero")),
+                argument: h
+            ),
+            argument: t
+        )
+        let bogusFalse = Term.variable("bogusFalse")
+        let matchTerm = Term.match(
+            scrutinee: scrutinee,
+            motive: motive,
+            cases: [
+                "vnil": bogusFalse,
+                "vcons": Term.abstraction(
+                    param: "n",
+                    type: nat,
+                    body: Term.abstraction(
+                        param: "h",
+                        type: nat,
+                        body: Term.abstraction(param: "t", type: vecZero, body: bogusFalse)
+                    )
+                ),
+            ]
+        )
+
+        XCTAssertThrowsError(
+            try TypeChecker.typeCheck(
+                term: matchTerm,
+                declarations: env,
+                environment: [
+                    "Vec": vecType,
+                    "zero": nat,
+                    "succ": succType,
+                    "h": nat,
+                    "t": vecZero,
+                    "bogusFalse": falseType,
+                ]
+            )
+        ) { error in
+            guard case .indexMismatch(let constructor, _, _) = error as? TypeError else {
+                return XCTFail("Expected indexMismatch, got \(error)")
+            }
+            XCTAssertEqual(constructor, "vnil")
+        }
+    }
+
+    func testBogusIndexSubstitutionRejection() throws {
+        let vecType = Term.pi(param: "n", type: nat, body: Term.universe(0))
+        var env = try natEnvironment()
+        try env.add(Declaration(name: "Vec", kind: .constant, type: vecType))
+        try env.add(Declaration(name: "False", kind: .inductive, type: .universe(0)))
+        try env.closeInductive("False")
+
+        let vecZero = Term.application(function: .variable("Vec"), argument: .variable("zero"))
+        let vecN = Term.application(function: .variable("Vec"), argument: .variable("n"))
+        let vecSuccN = Term.application(
+            function: .variable("Vec"),
+            argument: Term.application(function: .variable("succ"), argument: .variable("n"))
+        )
+        try env.add(Declaration(name: "vnil", kind: .constructor, type: vecZero))
         let vconsType = Term.pi(
             param: "n",
             type: nat,
@@ -587,50 +726,56 @@ final class InductiveTypesTests: XCTestCase {
                 body: Term.pi(param: "t", type: vecN, body: vecSuccN)
             )
         )
-        let vecSuccZero = Term.application(
+        try env.add(Declaration(name: "vcons", kind: .constructor, type: vconsType))
+        try env.closeInductive("Vec")
+
+        let vecSuccK = Term.application(
             function: .variable("Vec"),
-            argument: Term.application(function: .variable("succ"), argument: .variable("zero"))
+            argument: Term.application(function: .variable("succ"), argument: .variable("k"))
         )
-        let motive = Term.constantMotive(scrutineeType: vecSuccZero, returnType: witness)
-        let scrutinee = Term.application(
-            function: Term.application(
-                function: Term.application(function: .variable("vcons"), argument: .variable("zero")),
-                argument: h
-            ),
-            argument: t
-        )
+        let falseType = Term.variable("False")
+        let bogusFalse = Term.variable("bogusFalse")
+        let motive = Term.constantMotive(scrutineeType: vecSuccK, returnType: falseType)
         let matchTerm = Term.match(
-            scrutinee: scrutinee,
+            scrutinee: .variable("xs"),
             motive: motive,
             cases: [
-                "vnil": witness,
+                "vnil": bogusFalse,
                 "vcons": Term.abstraction(
-                    param: "n",
+                    param: "k",
                     type: nat,
                     body: Term.abstraction(
-                        param: "h",
+                        param: "x",
                         type: nat,
-                        body: Term.abstraction(param: "t", type: vecN, body: witness)
+                        body: Term.abstraction(
+                            param: "tail",
+                            type: Term.application(function: .variable("Vec"), argument: .variable("k")),
+                            body: bogusFalse
+                        )
                     )
-                ),
+                )
             ]
         )
 
-        let inferred = try TypeChecker.typeCheck(
-            term: matchTerm,
-            declarations: env,
-            environment: [
-                "Vec": vecType,
-                "zero": nat,
-                "succ": succType,
-                "vnil": vecZero,
-                "vcons": vconsType,
-                "h": nat,
-                "t": vecZero,
-                "w": Term.universe(0),
-            ]
-        )
-        XCTAssertTrue(try Conversion().areDefinitionallyEqual(inferred, witness))
+        XCTAssertThrowsError(
+            try TypeChecker.typeCheck(
+                term: matchTerm,
+                declarations: env,
+                environment: [
+                    "Vec": vecType,
+                    "zero": nat,
+                    "succ": succType,
+                    "k": nat,
+                    "xs": vecSuccK,
+                    "bogusFalse": falseType,
+                ]
+            )
+        ) { error in
+            guard case .indexMismatch(let constructor, _, _) = error as? TypeError else {
+                return XCTFail("Expected indexMismatch, got \(error)")
+            }
+            XCTAssertEqual(constructor, "vnil")
+        }
     }
 
     func testAbsurdEliminationOnFalse() throws {

@@ -69,6 +69,37 @@ final class DeclarationTests: XCTestCase {
         )
     }
 
+    func testConstantWithValueRequiresTypeChecker() throws {
+        let loopType = Term.pi(param: "n", type: .variable("Nat"), body: .variable("Nat"))
+        let loopValue = Term.abstraction(
+            param: "n",
+            type: .variable("Nat"),
+            body: Term.application(function: .variable("loop"), argument: .variable("n"))
+        )
+
+        var env = DeclarationEnvironment()
+        try env.add(Declaration(name: "Nat", kind: .inductive, type: .universe(0)))
+        try env.closeInductive("Nat")
+
+        XCTAssertThrowsError(
+            try env.add(Declaration(name: "loop", kind: .constant, type: loopType, value: loopValue))
+        ) { error in
+            XCTAssertEqual(
+                error as? DeclarationEnvironmentError,
+                .requiresTypeChecker("loop")
+            )
+        }
+
+        var checker = TypeChecker(declarations: env)
+        XCTAssertThrowsError(
+            try checker.checkDeclaration(
+                Declaration(name: "loop", kind: .constant, type: loopType, value: loopValue)
+            )
+        ) { error in
+            XCTAssertEqual(error as? TypeError, .unsupportedTermination("loop"))
+        }
+    }
+
     func testTheoremRejectsUnsolvedHoleInProof() {
         let statement = Term.pi(param: "x", type: .universe(0), body: .universe(0))
         let theorem = Declaration(

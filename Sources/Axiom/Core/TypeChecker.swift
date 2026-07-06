@@ -44,6 +44,9 @@ public enum TypeError: Error, Equatable, Sendable {
     case impredicativeQuantification(inductive: String, universeLevel: Int, occurrence: Term)
 
     case invalidInductiveSort(String, Term)
+
+    /// Constructor branch indices do not unify with the scrutinee's indices.
+    case indexMismatch(constructor: String, expected: Term, actual: Term)
 }
 
 // MARK: - Type checker
@@ -156,6 +159,7 @@ public struct TypeChecker {
                 throw TypeError.notInductive(scrutinee, scrutineeType)
             }
             let inductiveName = eliminationTarget.name
+            let scrutineeIndices = eliminationTarget.indices
             guard declarations.isInductiveClosed(inductiveName) else {
                 throw TypeError.inductiveNotClosed(inductiveName)
             }
@@ -224,6 +228,9 @@ public struct TypeChecker {
                     constructorName: constructorName,
                     inductiveName: inductiveName,
                     constructorType: constructor.type,
+                    branch: branch,
+                    scrutinee: scrutinee,
+                    scrutineeIndices: scrutineeIndices,
                     motive: motive,
                     motiveParam: motiveParam,
                     environment: environment
@@ -295,7 +302,7 @@ public struct TypeChecker {
             return
         }
 
-        if declaration.kind == .definition || declaration.kind == .theorem {
+        if declaration.kind == .definition || declaration.kind == .theorem || declaration.kind == .constant {
             do {
                 try TerminationChecker().checkClusterTermination(
                     newName: declaration.name,
@@ -622,7 +629,7 @@ public struct TypeChecker {
 
     private mutating func registerDeclaration(_ declaration: Declaration) throws {
         do {
-            try declarations.add(declaration)
+            try declarations.insert(declaration)
         } catch let DeclarationEnvironmentError.inductiveAlreadyClosed(name) {
             throw TypeError.inductiveAlreadyClosed(name)
         } catch let DeclarationEnvironmentError.missingInductiveDeclaration(name) {
@@ -644,7 +651,7 @@ public struct TypeChecker {
 
     private func recursiveCheckEnvironment(for declaration: Declaration) -> [String: Term] {
         switch declaration.kind {
-        case .definition, .theorem:
+        case .definition, .theorem, .constant:
             return [declaration.name: declaration.type]
         default:
             return [:]
@@ -861,25 +868,49 @@ public struct TypeChecker {
         constructorName: String,
         inductiveName: String,
         constructorType: Term,
+        branch: Term,
+        scrutinee: Term,
+        scrutineeIndices: [Term],
         motive: Term,
         motiveParam: String,
         environment: [String: Term]
     ) throws -> (Term, [String: Term]) {
         let parameters = peelPiParams(from: constructorType)
+        let branchLambdaParams = peelLambdaParams(from: branch, expectedArity: parameters.count)
+        let binderSubstitutions = constructorToBranchBinderSubstitutions(
+            constructorParameters: parameters,
+            branchLambdaParameters: branchLambdaParams
+        )
+        let argumentInstantiation = try constructorArgumentInstantiation(
+            constructorName: constructorName,
+            constructorType: constructorType,
+            constructorParameters: parameters,
+            binderSubstitutions: binderSubstitutions,
+            scrutinee: scrutinee
+        )
         var branchEnvironment = environment
-        for (param, domain) in parameters {
+        for (param, domain) in argumentInstantiation.parameters {
             branchEnvironment[param] = domain
         }
+        for (name, domain) in branchLambdaParams {
+            branchEnvironment[name] = domain
+        }
+        try ensureConstructorIndicesMatchScrutinee(
+            constructorName: constructorName,
+            expectedIndices: argumentInstantiation.indices,
+            scrutineeIndices: scrutineeIndices,
+            environment: branchEnvironment
+        )
         let instance = constructorInstance(
             constructorName: constructorName,
             inductiveName: inductiveName,
-            parameters: parameters
+            parameters: argumentInstantiation.parameters
         )
         let motiveInstance = applyMotive(
             motive,
             motiveParam: motiveParam,
             to: instance,
-            constructorParameters: parameters
+            constructorParameters: argumentInstantiation.parameters
         )
         let normalizedMotiveInstance = try conversion.normalize(
             instantiateHoles(in: motiveInstance),
@@ -891,10 +922,174 @@ public struct TypeChecker {
             environment: branchEnvironment
         )
         var branchType = branchBodyType
-        for (param, domain) in parameters.reversed() {
+        for (param, domain) in argumentInstantiation.parameters.reversed() {
             branchType = .pi(param: param, type: domain, body: branchType)
         }
         return (branchType, branchEnvironment)
+    }
+
+    private struct ConstructorArgumentInstantiation {
+        let parameters: [(String, Term)]
+        let indices: [Term]
+    }
+
+    /// Instantiates constructor parameter domains and return indices using scrutinee arguments when available.
+    private mutating func constructorArgumentInstantiation(
+        constructorName: String,
+        constructorType: Term,
+        constructorParameters: [(String, Term)],
+        binderSubstitutions: [(String, Term)],
+        scrutinee: Term
+    ) throws -> ConstructorArgumentInstantiation {
+        guard let constructorHead = InductiveFamily.codomainHead(constructorType) else {
+            return ConstructorArgumentInstantiation(
+                parameters: constructorParameters,
+                indices: []
+            )
+        }
+        var indices = constructorHead.indices
+        for (name, replacement) in binderSubstitutions {
+            indices = indices.map { $0.substituting(name: name, with: replacement) }
+        }
+        var instantiatedParameters: [(String, Term)] = []
+
+        if let arguments = try scrutineeConstructorArguments(
+            scrutinee: scrutinee,
+            constructorName: constructorName,
+            parameterCount: constructorParameters.count
+        ) {
+            var priorSubstitutions: [(String, Term)] = []
+            for ((param, domain), argument) in zip(constructorParameters, arguments) {
+                let instantiatedDomain = instantiateConstructorParameterDomain(
+                    domain,
+                    priorBindings: priorSubstitutions
+                )
+                instantiatedParameters.append((param, instantiatedDomain))
+                priorSubstitutions.append((param, argument))
+                indices = indices.map { $0.substituting(name: param, with: argument) }
+            }
+        } else {
+            instantiatedParameters = constructorParameters
+            for (param, _) in constructorParameters {
+                indices = indices.map { $0.substituting(name: param, with: .variable(param)) }
+            }
+        }
+
+        return ConstructorArgumentInstantiation(
+            parameters: instantiatedParameters,
+            indices: indices
+        )
+    }
+
+    private func instantiateConstructorParameterDomain(
+        _ domain: Term,
+        priorBindings: [(String, Term)]
+    ) -> Term {
+        var instantiated = domain
+        for (param, argument) in priorBindings {
+            instantiated = instantiated.substituting(name: param, with: argument)
+        }
+        return instantiated
+    }
+
+    /// Enforces CIC *indices_matter*: constructor return indices must unify with scrutinee indices.
+    private mutating func ensureConstructorIndicesMatchScrutinee(
+        constructorName: String,
+        expectedIndices: [Term],
+        scrutineeIndices: [Term],
+        environment: [String: Term]
+    ) throws {
+        guard expectedIndices.count == scrutineeIndices.count else {
+            let expected = expectedIndices.first ?? .universe(0)
+            let actual = scrutineeIndices.first ?? .universe(0)
+            throw TypeError.indexMismatch(
+                constructor: constructorName,
+                expected: expected,
+                actual: actual
+            )
+        }
+        for (expectedIndex, actualIndex) in zip(expectedIndices, scrutineeIndices) {
+            do {
+                try ensureConvertibleInEnvironment(
+                    expected: expectedIndex,
+                    actual: actualIndex,
+                    environment: environment
+                )
+            } catch let TypeError.typeMismatch(expected: expected, actual: actual) {
+                throw TypeError.indexMismatch(
+                    constructor: constructorName,
+                    expected: expected,
+                    actual: actual
+                )
+            }
+        }
+    }
+
+    private func peelLambdaParams(from term: Term, expectedArity: Int) -> [(String, Term)] {
+        var params: [(String, Term)] = []
+        var current = term
+        while params.count < expectedArity, case .abstraction(let name, let type, let body) = current {
+            params.append((name, type))
+            current = body
+        }
+        return params
+    }
+
+    private func constructorToBranchBinderSubstitutions(
+        constructorParameters: [(String, Term)],
+        branchLambdaParameters: [(String, Term)]
+    ) -> [(String, Term)] {
+        zip(constructorParameters, branchLambdaParameters).map { constructorParam, branchParam in
+            (constructorParam.0, .variable(branchParam.0))
+        }
+    }
+
+    private mutating func ensureConvertibleInEnvironment(
+        expected: Term,
+        actual: Term,
+        environment: [String: Term]
+    ) throws {
+        try ensureTermIsScoped(expected, environment: environment)
+        try ensureTermIsScoped(actual, environment: environment)
+        try ensureConvertible(expected: expected, actual: actual)
+    }
+
+    private func ensureTermIsScoped(_ term: Term, environment: [String: Term]) throws {
+        for name in term.freeVariables.sorted() {
+            if environment[name] != nil { continue }
+            if declarations.lookup(name) != nil { continue }
+            if declarations.lookup(resolvingQualifiedName: name) != nil { continue }
+            throw TypeError.unboundVariable(name)
+        }
+    }
+
+    /// When the scrutinee is headed by ``constructorName``, returns its applied arguments.
+    private mutating func scrutineeConstructorArguments(
+        scrutinee: Term,
+        constructorName: String,
+        parameterCount: Int
+    ) throws -> [Term]? {
+        let normalized = try conversion.normalize(
+            instantiateHoles(in: scrutinee),
+            budget: &reductionBudget,
+            unfolding: conversionUnfolding()
+        )
+        let (head, arguments) = InductiveFamily.peelApplicationSpine(normalized)
+        let resolvedHead = resolveMatchConstructorHead(head)
+        guard case .constructor(let name, _, _) = resolvedHead, name == constructorName else {
+            return nil
+        }
+        guard arguments.count == parameterCount else {
+            return nil
+        }
+        return arguments
+    }
+
+    private func resolveMatchConstructorHead(_ head: Term) -> Term {
+        if case .variable(let name) = head, let unfolded = conversionUnfolding()[name] {
+            return resolveMatchConstructorHead(unfolded)
+        }
+        return head
     }
 
     /// Type expected for a match branch after applying the motive to a constructor instance.

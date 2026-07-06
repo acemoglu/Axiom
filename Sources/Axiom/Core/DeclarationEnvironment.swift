@@ -56,6 +56,8 @@ public enum DeclarationEnvironmentError: Error, Equatable, Sendable {
     case missingInductiveDeclaration(String)
     /// Inductive sort must be a concrete ``Term/universe``.
     case invalidInductiveSort(String, Term)
+    /// Declarations with values must be registered through ``TypeChecker/checkDeclaration``.
+    case requiresTypeChecker(String)
 }
 
 public struct DeclarationEnvironment: Equatable, Sendable {
@@ -65,9 +67,25 @@ public struct DeclarationEnvironment: Equatable, Sendable {
 
     public init() {}
 
+    /// Stores a declaration that has already been validated by ``TypeChecker``.
+    mutating func insert(_ declaration: Declaration) throws {
+        if declarationsByName[declaration.name] != nil {
+            throw DeclarationEnvironmentError.duplicateDeclaration(declaration.name)
+        }
+        declarationsByName[declaration.name] = declaration
+        qualifiedToName[declaration.qualifiedName] = declaration.name
+    }
+
+    /// Registers inductive/constructor declarations and type-only constants.
+    ///
+    /// Declarations carrying a value (`definition`, `theorem`, `constant`, `axiom`) must use
+    /// ``TypeChecker/checkDeclaration`` so their bodies are type-checked and termination is verified.
     public mutating func add(_ declaration: Declaration) throws {
         if declarationsByName[declaration.name] != nil {
             throw DeclarationEnvironmentError.duplicateDeclaration(declaration.name)
+        }
+        if declaration.value != nil, requiresTypeCheckerValidation(declaration.kind) {
+            throw DeclarationEnvironmentError.requiresTypeChecker(declaration.name)
         }
         if declaration.kind == .constructor {
             if let inductiveName = inductiveName(inConstructorType: declaration.type),
@@ -76,16 +94,16 @@ public struct DeclarationEnvironment: Equatable, Sendable {
             }
             try validateConstructor(declaration.type)
         }
-        if declaration.kind == .definition || declaration.kind == .theorem,
-           let value = declaration.value {
-            try TerminationChecker().checkClusterTermination(
-                newName: declaration.name,
-                newValue: value,
-                existingDeclarations: allDeclarations
-            )
+        try insert(declaration)
+    }
+
+    private func requiresTypeCheckerValidation(_ kind: DeclarationKind) -> Bool {
+        switch kind {
+        case .constant, .definition, .theorem, .axiom:
+            return true
+        case .inductive, .constructor:
+            return false
         }
-        declarationsByName[declaration.name] = declaration
-        qualifiedToName[declaration.qualifiedName] = declaration.name
     }
 
     /// Positivity and predicative-universe checks for every constructor registration.

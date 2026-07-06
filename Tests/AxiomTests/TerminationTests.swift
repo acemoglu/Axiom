@@ -165,7 +165,7 @@ final class TerminationTests: XCTestCase {
         }
 
         var env = try natEnvironment()
-        try env.add(gDeclaration)
+        try env.insert(gDeclaration)
         var checker = TypeChecker(declarations: env)
         XCTAssertThrowsError(
             try checker.checkDeclaration(
@@ -176,6 +176,26 @@ final class TerminationTests: XCTestCase {
         }
     }
 
+    func testDeclarationEnvironmentRejectsValuedDefinitionWithoutTypeChecker() throws {
+        let loop = Term.abstraction(
+            param: "n",
+            type: .variable("Nat"),
+            body: Term.application(function: .variable("loop"), argument: .variable("n"))
+        )
+
+        var env = try natEnvironment()
+        XCTAssertThrowsError(
+            try env.add(
+                Declaration(name: "loop", kind: .definition, type: .variable("Nat"), value: loop)
+            )
+        ) { error in
+            XCTAssertEqual(
+                error as? DeclarationEnvironmentError,
+                .requiresTypeChecker("loop")
+            )
+        }
+    }
+
     func testDeclarationEnvironmentRejectsNonTerminatingDefinition() throws {
         let loop = Term.abstraction(
             param: "n",
@@ -183,16 +203,13 @@ final class TerminationTests: XCTestCase {
             body: Term.application(function: .variable("loop"), argument: .variable("n"))
         )
 
-        var env = try natEnvironment()
+        var checker = TypeChecker(declarations: try natEnvironment())
         XCTAssertThrowsError(
-            try env.add(
+            try checker.checkDeclaration(
                 Declaration(name: "loop", kind: .definition, type: nat, value: loop)
             )
         ) { error in
-            guard case .recursionNotOnMatch(let name) = error as? TerminationError else {
-                return XCTFail("Expected recursionNotOnMatch, got \(error)")
-            }
-            XCTAssertEqual(name, "loop")
+            XCTAssertEqual(error as? TypeError, .unsupportedTermination("loop"))
         }
     }
 
@@ -233,17 +250,15 @@ final class TerminationTests: XCTestCase {
 
         var env = try natEnvironment()
         let gDeclaration = Declaration(name: "g", kind: .definition, type: natFun, value: gBody)
-        try env.add(gDeclaration)
+        try env.insert(gDeclaration)
 
+        var checker = TypeChecker(declarations: env)
         XCTAssertThrowsError(
-            try env.add(
+            try checker.checkDeclaration(
                 Declaration(name: "f", kind: .definition, type: natFun, value: fBody)
             )
         ) { error in
-            guard case .recursionNotOnSmallerArgument(let name, _) = error as? TerminationError else {
-                return XCTFail("Expected recursionNotOnSmallerArgument, got \(error)")
-            }
-            XCTAssertEqual(name, "f")
+            XCTAssertEqual(error as? TypeError, .unsupportedTermination("f"))
         }
     }
 }
