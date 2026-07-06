@@ -131,7 +131,7 @@ public struct TypeChecker {
             let reducedFunctionType = try conversion.normalize(
                 instantiateHoles(in: functionType),
                 budget: &reductionBudget,
-                unfolding: typeUnfolding()
+                unfolding: conversionUnfolding()
             )
             guard case .pi(let param, let domain, let codomain) = reducedFunctionType else {
                 throw TypeError.notAFunction(function, functionType)
@@ -142,7 +142,7 @@ public struct TypeChecker {
                 in: try conversion.normalize(
                     codomain.substituting(name: param, with: argument),
                     budget: &reductionBudget,
-                    unfolding: typeUnfolding()
+                    unfolding: conversionUnfolding()
                 )
             )
 
@@ -162,19 +162,25 @@ public struct TypeChecker {
             let normalizedScrutineeType = try conversion.normalize(
                 instantiateHoles(in: scrutineeType),
                 budget: &reductionBudget,
-                unfolding: typeUnfolding()
+                unfolding: conversionUnfolding()
             )
             let motiveType = try typeCheck(term: motive, environment: environment)
             let normalizedMotiveType = try conversion.normalize(
                 instantiateHoles(in: motiveType),
                 budget: &reductionBudget,
-                unfolding: typeUnfolding()
+                unfolding: conversionUnfolding()
             )
             guard case .pi(let motiveParam, let motiveDomain, let motiveCodomain) = normalizedMotiveType else {
                 throw TypeError.motiveMismatch(expected: normalizedScrutineeType, actual: motiveType)
             }
             try ensureConvertible(expected: motiveDomain, actual: normalizedScrutineeType)
-            _ = try expectUniverseLevel(of: motive, inferredType: motiveCodomain)
+            var motiveEnvironment = environment
+            motiveEnvironment[motiveParam] = motiveDomain
+            let codomainSort = try typeCheck(
+                term: motiveCodomain,
+                environment: motiveEnvironment
+            )
+            _ = try expectUniverseLevel(of: motiveCodomain, inferredType: codomainSort)
             let constructorNames = allConstructors(for: inductiveName)
             if constructorNames.isEmpty {
                 for spuriousCase in cases.keys.sorted() {
@@ -205,7 +211,16 @@ public struct TypeChecker {
                         actual: constructor.type
                     )
                 }
-                let expectedBranchType = try expectedMatchBranchType(
+                let expectedArity = peelPiParams(from: constructor.type).count
+                let actualArity = lambdaArity(of: branch)
+                guard expectedArity == actualArity else {
+                    throw TypeError.matchArityMismatch(
+                        constructor: constructorName,
+                        expected: expectedArity,
+                        actual: actualArity
+                    )
+                }
+                let (expectedBranchType, branchEnvironment) = try expectedMatchBranchType(
                     constructorName: constructorName,
                     inductiveName: inductiveName,
                     constructorType: constructor.type,
@@ -217,12 +232,12 @@ public struct TypeChecker {
                     try checkTermMatchesType(
                         branch,
                         expected: expectedBranchType,
-                        environment: environment
+                        environment: branchEnvironment
                     )
                 } else {
                     let branchType = try typeCheck(
                         term: branch,
-                        environment: environment,
+                        environment: branchEnvironment,
                         expectedType: expectedBranchType
                     )
                     try ensureConvertibleOrInfer(expected: expectedBranchType, actual: branchType)
@@ -398,7 +413,7 @@ public struct TypeChecker {
             normalizedExpected,
             normalizedActual,
             budget: &reductionBudget,
-            unfolding: typeUnfolding()
+            unfolding: conversionUnfolding()
         ) else {
             throw TypeError.typeMismatch(expected: expected, actual: actual)
         }
@@ -412,7 +427,7 @@ public struct TypeChecker {
             normalizedExpected,
             normalizedActual,
             budget: &reductionBudget,
-            unfolding: typeUnfolding()
+            unfolding: conversionUnfolding()
         ) {
             return
         }
@@ -420,7 +435,7 @@ public struct TypeChecker {
             try Unifier.unify(
                 normalizedExpected,
                 normalizedActual,
-                unfolding: typeUnfolding(),
+                unfolding: conversionUnfolding(),
                 context: &metavariables
             )
         } catch is UnificationError {
@@ -432,7 +447,7 @@ public struct TypeChecker {
         try conversion.normalize(
             instantiateHoles(in: term),
             budget: &reductionBudget,
-            unfolding: typeUnfolding()
+            unfolding: conversionUnfolding()
         )
     }
 
@@ -690,6 +705,11 @@ public struct TypeChecker {
         transparentDefinitions()
     }
 
+    /// δ-definitions and registered constructor heads for normalization during checking.
+    func conversionUnfolding() -> [String: Term] {
+        reductionUnfolding()
+    }
+
     /// δ-definitions plus registered constructor heads for match reduction and conversion.
     private func reductionUnfolding() -> [String: Term] {
         var unfolding = typeUnfolding()
@@ -755,7 +775,7 @@ public struct TypeChecker {
         let normalized = try conversion.normalize(
             instantiateHoles(in: expected),
             budget: &reductionBudget,
-            unfolding: typeUnfolding()
+            unfolding: conversionUnfolding()
         )
         guard case .pi(_, let domain, let body) = normalized else { return nil }
         do {
@@ -774,6 +794,16 @@ public struct TypeChecker {
             current = body
         }
         return params
+    }
+
+    private func lambdaArity(of term: Term) -> Int {
+        var count = 0
+        var current = term
+        while case .abstraction(_, _, let body) = current {
+            count += 1
+            current = body
+        }
+        return count
     }
 
     /// Builds *c x₁ … xₙ* for motive application at a match branch.
@@ -827,7 +857,7 @@ public struct TypeChecker {
         motive: Term,
         motiveParam: String,
         environment: [String: Term]
-    ) throws -> Term {
+    ) throws -> (Term, [String: Term]) {
         let parameters = peelPiParams(from: constructorType)
         var branchEnvironment = environment
         for (param, domain) in parameters {
@@ -847,7 +877,7 @@ public struct TypeChecker {
         let normalizedMotiveInstance = try conversion.normalize(
             instantiateHoles(in: motiveInstance),
             budget: &reductionBudget,
-            unfolding: typeUnfolding()
+            unfolding: conversionUnfolding()
         )
         let branchBodyType = try motiveBranchTargetType(
             normalizedMotiveInstance,
@@ -857,7 +887,7 @@ public struct TypeChecker {
         for (param, domain) in parameters.reversed() {
             branchType = .pi(param: param, type: domain, body: branchType)
         }
-        return branchType
+        return (branchType, branchEnvironment)
     }
 
     /// Type expected for a match branch after applying the motive to a constructor instance.

@@ -98,6 +98,38 @@ final class InductiveTypesTests: XCTestCase {
         )
     }
 
+    func testMatchBranchBindsConstructorParameters() throws {
+        let returnType = Term.universe(0)
+        let witness = Term.variable("w")
+        let motive = Term.constantMotive(scrutineeType: nat, returnType: returnType)
+        let matchTerm = Term.match(
+            scrutinee: .variable("s"),
+            motive: motive,
+            cases: [
+                "zero": witness,
+                "succ": Term.abstraction(
+                    param: "n",
+                    type: .hole("N"),
+                    body: witness
+                ),
+            ]
+        )
+
+        let wrongNat = Term.pi(param: "_", type: returnType, body: returnType)
+        let inferred = try TypeChecker.typeCheck(
+            term: matchTerm,
+            declarations: try natEnvironment(),
+            environment: [
+                "s": nat,
+                "n": wrongNat,
+                "w": returnType,
+            ]
+        )
+        XCTAssertTrue(
+            try Conversion().areDefinitionallyEqual(inferred, returnType)
+        )
+    }
+
     func testIncompleteNatMatchRejected() throws {
         let returnType = Term.universe(0)
         let a = Term.variable("a")
@@ -139,9 +171,10 @@ final class InductiveTypesTests: XCTestCase {
                 environment: ["n": nat, "a": Term.universe(0)]
             )
         ) { error in
-            guard case .typeMismatch = error as? TypeError else {
-                return XCTFail("Expected typeMismatch, got \(error)")
-            }
+            XCTAssertEqual(
+                error as? TypeError,
+                .matchArityMismatch(constructor: "succ", expected: 1, actual: 0)
+            )
         }
     }
 
@@ -214,6 +247,82 @@ final class InductiveTypesTests: XCTestCase {
         XCTAssertTrue(try Conversion().areDefinitionallyEqual(inferred, expected))
     }
 
+    func testDependentMotiveWithIndexedFamilyCodomain() throws {
+        var env = try natEnvironment()
+        let vecType = Term.pi(param: "n", type: nat, body: Term.universe(0))
+        try env.add(
+            Declaration(
+                name: "Vec",
+                kind: .definition,
+                type: vecType,
+                value: Term.abstraction(param: "_", type: nat, body: Term.universe(0))
+            )
+        )
+        try env.add(Declaration(name: "False", kind: .inductive, type: .universe(0)))
+        try env.closeInductive("False")
+
+        try env.add(Declaration(name: "WitnessType", kind: .axiom, type: .universe(0)))
+        try env.add(
+            Declaration(
+                name: "VecMotive",
+                kind: .axiom,
+                type: Term.pi(param: "_", type: falseType, body: .variable("WitnessType"))
+            )
+        )
+
+        let absurdMatch = Term.match(
+            scrutinee: .variable("f"),
+            motive: .variable("VecMotive"),
+            cases: [:]
+        )
+
+        let inferred = try TypeChecker.typeCheck(
+            term: absurdMatch,
+            declarations: env,
+            environment: [
+                "Vec": vecType,
+                "zero": nat,
+                "f": falseType,
+            ]
+        )
+        let expected = Term.application(function: .variable("VecMotive"), argument: .variable("f"))
+        XCTAssertTrue(try Conversion().areDefinitionallyEqual(inferred, expected))
+    }
+
+    func testDependentMotiveRejectsNonUniverseCodomain() throws {
+        var env = try natEnvironment()
+        try env.add(Declaration(name: "False", kind: .inductive, type: .universe(0)))
+        try env.closeInductive("False")
+        try env.add(
+            Declaration(
+                name: "BadMotive",
+                kind: .axiom,
+                type: Term.pi(param: "_", type: falseType, body: .variable("zero"))
+            )
+        )
+
+        let matchTerm = Term.match(
+            scrutinee: .variable("f"),
+            motive: .variable("BadMotive"),
+            cases: [:]
+        )
+
+        XCTAssertThrowsError(
+            try TypeChecker.typeCheck(
+                term: matchTerm,
+                declarations: env,
+                environment: ["f": falseType, "zero": nat]
+            )
+        ) { error in
+            switch error as? TypeError {
+            case .expectedUniverse, .declarationUsedAsExpression:
+                break
+            default:
+                XCTFail("Expected expectedUniverse or declarationUsedAsExpression, got \(error)")
+            }
+        }
+    }
+
     func testMultiArgumentMatchReduction() throws {
         let elem = nat
         let list = Term.variable("List")
@@ -233,7 +342,6 @@ final class InductiveTypesTests: XCTestCase {
         let head = Term.variable("h")
         let tail = Term.variable("t")
         let witness = Term.variable("w")
-        let consHead = Term.constructor(name: "cons", inductiveName: "List", type: consType)
         let consHT = Term.application(
             function: Term.application(function: .variable("cons"), argument: head),
             argument: tail
@@ -253,21 +361,34 @@ final class InductiveTypesTests: XCTestCase {
         )
 
         var budget = ReductionBudget()
+        let checker = TypeChecker(declarations: env)
         XCTAssertEqual(
-            try matchTerm.reduced(budget: &budget, unfolding: ["cons": consHead]),
+            try matchTerm.reduced(budget: &budget, unfolding: checker.conversionUnfolding()),
             witness
         )
     }
 
     func testMultiArgumentMatchReductionWithVariableConstructorHead() throws {
-        let elem = Term.universe(0)
+        let elem = nat
         let list = Term.variable("List")
         let consType = Term.pi(
             param: "h",
             type: elem,
             body: Term.pi(param: "t", type: list, body: list)
         )
-        let consHead = Term.constructor(name: "cons", inductiveName: "List", type: consType)
+
+        var env = DeclarationEnvironment()
+        try env.add(Declaration(name: "Nat", kind: .inductive, type: .universe(0)))
+        try env.add(Declaration(name: "List", kind: .inductive, type: .universe(0)))
+        try env.add(Declaration(name: "nil", kind: .constructor, type: list))
+        try env.add(Declaration(name: "cons", kind: .constructor, type: consType))
+        try env.closeInductive("List")
+
+        let checker = TypeChecker(declarations: env)
+        guard case .constructor(let name, _, _) = checker.conversionUnfolding()["cons"] else {
+            return XCTFail("Expected cons to map to a constructor head in conversionUnfolding()")
+        }
+        XCTAssertEqual(name, "cons")
 
         let head = Term.variable("h")
         let tail = Term.variable("t")
@@ -293,7 +414,7 @@ final class InductiveTypesTests: XCTestCase {
         var budget = ReductionBudget()
         let reduced = try matchTerm.reduced(
             budget: &budget,
-            unfolding: ["cons": consHead]
+            unfolding: checker.conversionUnfolding()
         )
         XCTAssertEqual(reduced, witness)
     }
