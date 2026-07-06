@@ -134,21 +134,15 @@ public struct TypeChecker {
                 throw TypeError.declarationUsedAsExpression(term)
             }
             let functionType = try typeCheck(term: function, environment: environment)
-            let reducedFunctionType = try conversion.normalize(
-                instantiateHoles(in: functionType),
-                budget: &reductionBudget,
-                unfolding: conversionUnfolding()
-            )
+            let reducedFunctionType = try normalizeForChecking(functionType)
             guard case .pi(let param, let domain, let codomain) = reducedFunctionType else {
                 throw TypeError.notAFunction(function, functionType)
             }
             let argumentType = try typeCheck(term: argument, environment: environment)
             try ensureConvertibleOrInfer(expected: domain, actual: argumentType)
             return instantiateHoles(
-                in: try conversion.normalize(
-                    codomain.substituting(name: param, with: argument),
-                    budget: &reductionBudget,
-                    unfolding: conversionUnfolding()
+                in: try normalizeForChecking(
+                    codomain.substituting(name: param, with: argument)
                 )
             )
 
@@ -166,17 +160,9 @@ public struct TypeChecker {
             guard declarations.isInductiveClosed(inductiveName) else {
                 throw TypeError.inductiveNotClosed(inductiveName)
             }
-            let normalizedScrutineeType = try conversion.normalize(
-                instantiateHoles(in: scrutineeType),
-                budget: &reductionBudget,
-                unfolding: conversionUnfolding()
-            )
+            let normalizedScrutineeType = try normalizeForChecking(scrutineeType)
             let motiveType = try typeCheck(term: motive, environment: environment)
-            let normalizedMotiveType = try conversion.normalize(
-                instantiateHoles(in: motiveType),
-                budget: &reductionBudget,
-                unfolding: conversionUnfolding()
-            )
+            let normalizedMotiveType = try normalizeForChecking(motiveType)
             guard case .pi(let motiveParam, let motiveDomain, let motiveCodomain) = normalizedMotiveType else {
                 throw TypeError.motiveMismatch(expected: normalizedScrutineeType, actual: motiveType)
             }
@@ -453,7 +439,7 @@ public struct TypeChecker {
         }
     }
 
-    private mutating func normalizedForComparison(_ term: Term) throws -> Term {
+    private mutating func normalizeForChecking(_ term: Term) throws -> Term {
         do {
             return try conversion.normalize(
                 instantiateHoles(in: term),
@@ -463,6 +449,10 @@ public struct TypeChecker {
         } catch ReductionError.outOfFuel {
             throw TypeError.reductionOutOfBounds(term)
         }
+    }
+
+    private mutating func normalizedForComparison(_ term: Term) throws -> Term {
+        try normalizeForChecking(term)
     }
 
     private func expectUniverseLevel(of term: Term, inferredType: Term) throws -> Int {
@@ -793,11 +783,7 @@ public struct TypeChecker {
         param: String,
         paramType: Term
     ) throws -> Term? {
-        let normalized = try conversion.normalize(
-            instantiateHoles(in: expected),
-            budget: &reductionBudget,
-            unfolding: conversionUnfolding()
-        )
+        let normalized = try normalizeForChecking(expected)
         guard case .pi(_, let domain, let body) = normalized else { return nil }
         do {
             try ensureConvertibleOrInfer(expected: domain, actual: paramType)
@@ -919,11 +905,7 @@ public struct TypeChecker {
             to: instance,
             constructorParameters: argumentInstantiation.parameters
         )
-        let normalizedMotiveInstance = try conversion.normalize(
-            instantiateHoles(in: motiveInstance),
-            budget: &reductionBudget,
-            unfolding: conversionUnfolding()
-        )
+        let normalizedMotiveInstance = try normalizeForChecking(motiveInstance)
         let branchBodyType = try motiveBranchTargetType(
             normalizedMotiveInstance,
             environment: branchEnvironment
@@ -1076,11 +1058,7 @@ public struct TypeChecker {
         constructorName: String,
         parameterCount: Int
     ) throws -> [Term]? {
-        let normalized = try conversion.normalize(
-            instantiateHoles(in: scrutinee),
-            budget: &reductionBudget,
-            unfolding: conversionUnfolding()
-        )
+        let normalized = try normalizeForChecking(scrutinee)
         let (head, arguments) = InductiveFamily.peelApplicationSpine(normalized)
         let resolvedHead = resolveMatchConstructorHead(head)
         guard case .constructor(let name, _, _) = resolvedHead, name == constructorName else {
