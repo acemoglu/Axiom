@@ -16,4 +16,23 @@ final class ConversionTests: XCTestCase {
         let conversion = Conversion(strategy: .normalForm)
         XCTAssertTrue(try conversion.areDefinitionallyEqual(applied, .universe(0)))
     }
+
+    func testFreshNameSkipsLegacyAndReservedPrefixes() {
+        let used: Set<String> = ["$v0", "$m0", "$u0", "#0"]
+        XCTAssertEqual(Term.freshName(avoiding: used), "#1")
+    }
+
+    func testSubstitutionFreshensWhenReplacementCapturesBinder() {
+        // [z := x] in λx. z — replacement mentions binder x, so freshen to #0.
+        let term = Term.abstraction(
+            param: "x",
+            type: .universe(0),
+            body: .variable("z")
+        )
+        let result = term.substituting(name: "z", with: .variable("x"))
+        XCTAssertEqual(
+            result,
+            Term.abstraction(param: "#0", type: .universe(0), body: .variable("x"))
+        )
+    }
 }

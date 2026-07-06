@@ -3,33 +3,32 @@ import XCTest
 
 final class PositivityTests: XCTestCase {
 
-    private let nat = Term.inductive(name: "Nat", type: .universe(0))
-    private lazy var zero = Term.constructor(name: "zero", inductiveName: "Nat", type: nat)
-    private lazy var succ = Term.constructor(
-        name: "succ",
-        inductiveName: "Nat",
-        type: Term.pi(param: "n", type: nat, body: nat)
-    )
+    private var nat: Term { .variable("Nat") }
+    private var succType: Term {
+        Term.pi(param: "n", type: nat, body: nat)
+    }
 
     func testNatConstructorsAreStrictlyPositive() throws {
         var checker = TypeChecker()
-        _ = try checker.typeCheck(term: nat)
-        _ = try checker.typeCheck(term: zero)
-        XCTAssertNoThrow(try checker.typeCheck(term: succ))
+        try checker.checkDeclaration(Declaration(name: "Nat", kind: .inductive, type: .universe(0)))
+        try checker.checkDeclaration(Declaration(name: "zero", kind: .constructor, type: nat))
+        XCTAssertNoThrow(
+            try checker.checkDeclaration(Declaration(name: "succ", kind: .constructor, type: succType))
+        )
     }
 
     func testRejectsFunctionArgumentWithInductiveInDomain() throws {
-        let bad = Term.inductive(name: "Bad", type: .universe(0))
-        let negativeArg = Term.pi(param: "x", type: bad, body: bad)
-        let badConstructor = Term.constructor(
-            name: "bad",
-            inductiveName: "Bad",
-            type: Term.pi(param: "f", type: negativeArg, body: bad)
-        )
+        let badType = Term.variable("Bad")
+        let negativeArg = Term.pi(param: "x", type: badType, body: badType)
+        let constructorType = Term.pi(param: "f", type: negativeArg, body: badType)
 
         var checker = TypeChecker()
-        _ = try checker.typeCheck(term: bad)
-        XCTAssertThrowsError(try checker.typeCheck(term: badConstructor)) { error in
+        try checker.checkDeclaration(Declaration(name: "Bad", kind: .inductive, type: .universe(0)))
+        XCTAssertThrowsError(
+            try checker.checkDeclaration(
+                Declaration(name: "bad", kind: .constructor, type: constructorType)
+            )
+        ) { error in
             guard case .nonStrictlyPositive(let inductive, _) = error as? TypeError else {
                 return XCTFail("Expected nonStrictlyPositive, got \(error)")
             }
@@ -38,7 +37,7 @@ final class PositivityTests: XCTestCase {
     }
 
     func testRejectsConstructorTypeWithUnresolvedHole() throws {
-        let list = Term.inductive(name: "List", type: .universe(0))
+        let list = Term.variable("List")
         let consType = Term.pi(
             param: "x",
             type: .hole("A"),
@@ -92,7 +91,7 @@ final class PositivityTests: XCTestCase {
     }
 
     func testDeclarationEnvironmentRejectsVariableConstructorCodomain() {
-        let constructorType = Term.pi(param: "x", type: nat, body: .universe(0))
+        let constructorType = Term.pi(param: "x", type: .variable("Nat"), body: .universe(0))
 
         var env = DeclarationEnvironment()
         XCTAssertNoThrow(try env.add(Declaration(name: "Bad", kind: .inductive, type: .universe(0))))

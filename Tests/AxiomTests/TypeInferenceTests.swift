@@ -11,8 +11,7 @@ final class TypeInferenceTests: XCTestCase {
     }
 
     func testUnifyRespectsDeltaUnfolding() throws {
-        let nat = Term.inductive(name: "Nat", type: .universe(0))
-        let zero = Term.constructor(name: "zero", inductiveName: "Nat", type: nat)
+        let zero = Term.variable("zero")
         let unfolding = ["box": zero]
 
         var context: [String: Term] = [:]

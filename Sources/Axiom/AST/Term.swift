@@ -226,6 +226,16 @@ extension Term {
         return build(fresh, freshenedType, freshenedBody)
             .substituting(name: name, with: replacement)
     }
+
+    /// Generates a capture-avoiding binder name outside user syntax (`#0`, `#1`, …).
+    static func freshName(avoiding used: Set<String>) -> String {
+        var index = 0
+        while true {
+            let candidate = "#\(index)"
+            if !used.contains(candidate) { return candidate }
+            index += 1
+        }
+    }
 }
 
 // MARK: - β-reduction and match reduction
@@ -360,15 +370,6 @@ private extension Term {
             ) { partial, branch in
                 partial.union(branch.allVariableNames)
             }
-        }
-    }
-
-    static func freshName(avoiding used: Set<String>) -> String {
-        var index = 0
-        while true {
-            let candidate = "$v\(index)"
-            if !used.contains(candidate) { return candidate }
-            index += 1
         }
     }
 }

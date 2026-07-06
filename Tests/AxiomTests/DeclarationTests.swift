@@ -39,20 +39,18 @@ final class DeclarationTests: XCTestCase {
     }
 
     func testAxiomValueDoesNotParticipateInDeltaReduction() throws {
-        let nat = Term.inductive(name: "Nat", type: .universe(0))
-        let zero = Term.constructor(name: "zero", inductiveName: "Nat", type: nat)
-
         var env = DeclarationEnvironment()
         try env.add(Declaration(name: "Nat", kind: .inductive, type: .universe(0)))
-        try env.add(Declaration(name: "zero", kind: .constructor, type: nat))
+        try env.add(Declaration(name: "zero", kind: .constructor, type: .variable("Nat")))
         try env.closeInductive("Nat")
 
+        let zero = Term.variable("zero")
         var checker = TypeChecker(declarations: env)
         try checker.checkDeclaration(
-            Declaration(name: "box", kind: .definition, type: nat, value: zero)
+            Declaration(name: "box", kind: .definition, type: .variable("Nat"), value: zero)
         )
         try checker.checkDeclaration(
-            Declaration(name: "locked", kind: .axiom, type: nat, value: zero)
+            Declaration(name: "locked", kind: .axiom, type: .variable("Nat"), value: zero)
         )
 
         let conversion = Conversion()

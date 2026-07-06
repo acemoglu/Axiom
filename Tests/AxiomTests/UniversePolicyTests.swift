@@ -3,10 +3,10 @@ import XCTest
 
 final class UniversePolicyTests: XCTestCase {
 
-    private let nat = Term.inductive(name: "Nat", type: .universe(0))
+    private var nat: Term { .variable("Nat") }
 
     func testRejectsImpredicativeBoxConstructor() throws {
-        let box = Term.inductive(name: "Box", type: .universe(0))
+        let box = Term.variable("Box")
         let aToBox = Term.pi(param: "x", type: .variable("A"), body: box)
         let boxConstructorType = Term.pi(
             param: "A",
@@ -31,7 +31,7 @@ final class UniversePolicyTests: XCTestCase {
     }
 
     func testAllowsConstructorQuantifyingOverLowerUniverse() throws {
-        let big = Term.inductive(name: "Big", type: .universe(1))
+        let big = Term.variable("Big")
         let constructorType = Term.pi(param: "A", type: .universe(0), body: big)
 
         var env = DeclarationEnvironment()
@@ -70,16 +70,16 @@ final class UniversePolicyTests: XCTestCase {
     }
 
     func testTypeCheckerRejectsImpredicativeConstructor() throws {
-        let box = Term.inductive(name: "Box", type: .universe(0))
-        let boxConstructor = Term.constructor(
-            name: "box",
-            inductiveName: "Box",
-            type: Term.pi(param: "A", type: .universe(0), body: box)
-        )
+        let boxType = Term.variable("Box")
+        let boxConstructorType = Term.pi(param: "A", type: .universe(0), body: boxType)
 
         var checker = TypeChecker()
-        _ = try checker.typeCheck(term: box)
-        XCTAssertThrowsError(try checker.typeCheck(term: boxConstructor)) { error in
+        try checker.checkDeclaration(Declaration(name: "Box", kind: .inductive, type: .universe(0)))
+        XCTAssertThrowsError(
+            try checker.checkDeclaration(
+                Declaration(name: "box", kind: .constructor, type: boxConstructorType)
+            )
+        ) { error in
             guard case .impredicativeQuantification(let inductive, let level, _) = error as? TypeError else {
                 return XCTFail("Expected impredicativeQuantification, got \(error)")
             }

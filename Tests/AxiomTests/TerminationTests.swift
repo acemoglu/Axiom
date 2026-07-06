@@ -3,25 +3,16 @@ import XCTest
 
 final class TerminationTests: XCTestCase {
 
-    private let nat = Term.inductive(name: "Nat", type: .universe(0))
-    private lazy var zero = Term.constructor(name: "zero", inductiveName: "Nat", type: nat)
-    private lazy var succ = Term.constructor(
-        name: "succ",
-        inductiveName: "Nat",
-        type: Term.pi(param: "n", type: nat, body: nat)
-    )
+    private var nat: Term { .variable("Nat") }
+    private var succType: Term {
+        Term.pi(param: "n", type: nat, body: nat)
+    }
 
     private func natEnvironment() throws -> DeclarationEnvironment {
         var env = DeclarationEnvironment()
         try env.add(Declaration(name: "Nat", kind: .inductive, type: .universe(0)))
         try env.add(Declaration(name: "zero", kind: .constructor, type: nat))
-        try env.add(
-            Declaration(
-                name: "succ",
-                kind: .constructor,
-                type: Term.pi(param: "n", type: nat, body: nat)
-            )
-        )
+        try env.add(Declaration(name: "succ", kind: .constructor, type: succType))
         try env.closeInductive("Nat")
         return env
     }

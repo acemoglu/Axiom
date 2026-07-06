@@ -4,25 +4,17 @@ import XCTest
 /// Verifies inductive declarations, constructors, and elimination by ``Term/match``.
 final class InductiveTypesTests: XCTestCase {
 
-    private let nat = Term.inductive(name: "Nat", type: .universe(0))
-    private lazy var zero = Term.constructor(name: "zero", inductiveName: "Nat", type: nat)
-    private lazy var succ = Term.constructor(
-        name: "succ",
-        inductiveName: "Nat",
-        type: Term.pi(param: "n", type: nat, body: nat)
-    )
+    private var nat: Term { .variable("Nat") }
+    private var falseType: Term { .variable("False") }
+    private var succType: Term {
+        Term.pi(param: "n", type: nat, body: nat)
+    }
 
     private func natEnvironment() throws -> DeclarationEnvironment {
         var env = DeclarationEnvironment()
         try env.add(Declaration(name: "Nat", kind: .inductive, type: .universe(0)))
         try env.add(Declaration(name: "zero", kind: .constructor, type: nat))
-        try env.add(
-            Declaration(
-                name: "succ",
-                kind: .constructor,
-                type: Term.pi(param: "n", type: nat, body: nat)
-            )
-        )
+        try env.add(Declaration(name: "succ", kind: .constructor, type: succType))
         try env.closeInductive("Nat")
         return env
     }
@@ -32,7 +24,7 @@ final class InductiveTypesTests: XCTestCase {
         let a = Term.variable("a")
         let motive = Term.constantMotive(scrutineeType: nat, returnType: returnType)
         let matchOnZero = Term.match(
-            scrutinee: zero,
+            scrutinee: .variable("zero"),
             motive: motive,
             cases: [
                 "zero": a,
@@ -40,7 +32,16 @@ final class InductiveTypesTests: XCTestCase {
             ]
         )
 
-        XCTAssertEqual(try matchOnZero.reduced(), a)
+        let zeroHead = Term.constructor(
+            name: "zero",
+            inductiveName: "Nat",
+            type: nat
+        )
+        var budget = ReductionBudget()
+        XCTAssertEqual(
+            try matchOnZero.reduced(budget: &budget, unfolding: ["zero": zeroHead]),
+            a
+        )
 
         let inferred = try TypeChecker.typeCheck(
             term: matchOnZero,
@@ -53,12 +54,25 @@ final class InductiveTypesTests: XCTestCase {
     }
 
     func testNatAndConstructorsTypecheck() throws {
-        XCTAssertEqual(try TypeChecker.typeCheck(term: nat), Term.universe(0))
-        XCTAssertEqual(try TypeChecker.typeCheck(term: zero), nat)
-        XCTAssertEqual(
-            try TypeChecker.typeCheck(term: succ),
-            Term.pi(param: "n", type: nat, body: nat)
-        )
+        var checker = TypeChecker()
+        try checker.checkDeclaration(Declaration(name: "Nat", kind: .inductive, type: .universe(0)))
+        try checker.checkDeclaration(Declaration(name: "zero", kind: .constructor, type: nat))
+        try checker.checkDeclaration(Declaration(name: "succ", kind: .constructor, type: succType))
+
+        XCTAssertEqual(try checker.typeCheck(term: .variable("zero")), nat)
+        XCTAssertEqual(try checker.typeCheck(term: .variable("succ")), succType)
+    }
+
+    func testDeclarationNodesRejectedAsExpressions() {
+        let natDecl = Term.inductive(name: "Nat", type: .universe(0))
+        let zeroDecl = Term.constructor(name: "zero", inductiveName: "Nat", type: natDecl)
+
+        XCTAssertThrowsError(try TypeChecker.typeCheck(term: natDecl)) { error in
+            XCTAssertEqual(error as? TypeError, .declarationUsedAsExpression(natDecl))
+        }
+        XCTAssertThrowsError(try TypeChecker.typeCheck(term: zeroDecl)) { error in
+            XCTAssertEqual(error as? TypeError, .declarationUsedAsExpression(zeroDecl))
+        }
     }
 
     func testCompleteNatMatch() throws {
@@ -168,11 +182,9 @@ final class InductiveTypesTests: XCTestCase {
             )
         )
 
-        let P = Term.abstraction(
-            param: "i",
-            type: nat,
-            body: nat
-        )
+        let returnType = Term.universe(0)
+        let witness = Term.variable("w")
+        let P = Term.abstraction(param: "i", type: nat, body: returnType)
         let succZero = Term.application(
             function: .variable("succ"),
             argument: .variable("zero")
@@ -182,12 +194,8 @@ final class InductiveTypesTests: XCTestCase {
             scrutinee: succZero,
             motive: P,
             cases: [
-                "zero": zero,
-                "succ": Term.abstraction(
-                    param: "n",
-                    type: nat,
-                    body: Term.application(function: .variable("succ"), argument: .variable("n"))
-                ),
+                "zero": witness,
+                "succ": Term.abstraction(param: "n", type: nat, body: witness),
             ]
         )
 
@@ -197,7 +205,8 @@ final class InductiveTypesTests: XCTestCase {
             environment: [
                 "Vec": vecType,
                 "zero": nat,
-                "succ": Term.pi(param: "n", type: nat, body: nat),
+                "succ": succType,
+                "w": returnType,
             ]
         )
 
@@ -207,7 +216,7 @@ final class InductiveTypesTests: XCTestCase {
 
     func testMultiArgumentMatchReduction() throws {
         let elem = nat
-        let list = Term.inductive(name: "List", type: .universe(0))
+        let list = Term.variable("List")
         let nilType = list
         let consType = Term.pi(
             param: "h",
@@ -224,9 +233,9 @@ final class InductiveTypesTests: XCTestCase {
         let head = Term.variable("h")
         let tail = Term.variable("t")
         let witness = Term.variable("w")
-        let cons = Term.constructor(name: "cons", inductiveName: "List", type: consType)
+        let consHead = Term.constructor(name: "cons", inductiveName: "List", type: consType)
         let consHT = Term.application(
-            function: Term.application(function: cons, argument: head),
+            function: Term.application(function: .variable("cons"), argument: head),
             argument: tail
         )
         let motive = Term.constantMotive(scrutineeType: list, returnType: witness)
@@ -243,12 +252,16 @@ final class InductiveTypesTests: XCTestCase {
             ]
         )
 
-        XCTAssertEqual(try matchTerm.reduced(), witness)
+        var budget = ReductionBudget()
+        XCTAssertEqual(
+            try matchTerm.reduced(budget: &budget, unfolding: ["cons": consHead]),
+            witness
+        )
     }
 
     func testMultiArgumentMatchReductionWithVariableConstructorHead() throws {
         let elem = Term.universe(0)
-        let list = Term.inductive(name: "List", type: .universe(0))
+        let list = Term.variable("List")
         let consType = Term.pi(
             param: "h",
             type: elem,
@@ -319,7 +332,7 @@ final class InductiveTypesTests: XCTestCase {
                 environment: [
                     "Vec": vecType,
                     "zero": nat,
-                    "succ": Term.pi(param: "n", type: nat, body: nat),
+                    "succ": succType,
                     "badZero": nat,
                     "vs": Term.universe(0),
                 ]
@@ -338,7 +351,7 @@ final class InductiveTypesTests: XCTestCase {
         let returnType = Term.universe(0)
         let witness = Term.variable("a")
         let matchTerm = Term.match(
-            scrutinee: zero,
+            scrutinee: .variable("zero"),
             motive: Term.constantMotive(scrutineeType: nat, returnType: returnType),
             cases: [
                 "zero": witness,
@@ -361,7 +374,7 @@ final class InductiveTypesTests: XCTestCase {
 
         let motive = Term.constantMotive(scrutineeType: nat, returnType: .universe(0))
         let matchTerm = Term.match(
-            scrutinee: zero,
+            scrutinee: .variable("zero"),
             motive: motive,
             cases: ["zero": .universe(0)]
         )
@@ -488,7 +501,7 @@ final class InductiveTypesTests: XCTestCase {
             environment: [
                 "Vec": vecType,
                 "zero": nat,
-                "succ": Term.pi(param: "n", type: nat, body: nat),
+                "succ": succType,
                 "vnil": vecZero,
                 "vcons": vconsType,
                 "h": nat,
@@ -504,7 +517,6 @@ final class InductiveTypesTests: XCTestCase {
         try env.add(Declaration(name: "False", kind: .inductive, type: .universe(0)))
         try env.closeInductive("False")
 
-        let falseType = Term.inductive(name: "False", type: .universe(0))
         let hypothesis = Term.variable("f")
         let motive = Term.constantMotive(scrutineeType: falseType, returnType: .universe(0))
         let absurdMatch = Term.match(scrutinee: hypothesis, motive: motive, cases: [:])
@@ -519,11 +531,10 @@ final class InductiveTypesTests: XCTestCase {
     }
 
     func testAbsurdEliminationDerivesArbitraryType() throws {
-        var env = DeclarationEnvironment()
+        var env = try natEnvironment()
         try env.add(Declaration(name: "False", kind: .inductive, type: .universe(0)))
         try env.closeInductive("False")
 
-        let falseType = Term.inductive(name: "False", type: .universe(0))
         let motive = Term.abstraction(param: "_", type: falseType, body: nat)
         let absurdMatch = Term.match(scrutinee: .variable("f"), motive: motive, cases: [:])
 
@@ -540,7 +551,6 @@ final class InductiveTypesTests: XCTestCase {
         try env.add(Declaration(name: "False", kind: .inductive, type: .universe(0)))
         try env.closeInductive("False")
 
-        let falseType = Term.inductive(name: "False", type: .universe(0))
         let motive = Term.constantMotive(scrutineeType: falseType, returnType: .universe(0))
         let absurdMatch = Term.match(
             scrutinee: .variable("f"),
@@ -561,7 +571,11 @@ final class InductiveTypesTests: XCTestCase {
 
     func testEmptyMatchStillRejectedForNonemptyInductive() throws {
         let motive = Term.constantMotive(scrutineeType: nat, returnType: .universe(0))
-        let emptyMatch = Term.match(scrutinee: zero, motive: motive, cases: [:])
+        let emptyMatch = Term.match(
+            scrutinee: .variable("zero"),
+            motive: motive,
+            cases: [:]
+        )
 
         XCTAssertThrowsError(
             try TypeChecker.typeCheck(term: emptyMatch, declarations: try natEnvironment())
@@ -574,7 +588,6 @@ final class InductiveTypesTests: XCTestCase {
         var env = DeclarationEnvironment()
         try env.add(Declaration(name: "False", kind: .inductive, type: .universe(0)))
 
-        let falseType = Term.inductive(name: "False", type: .universe(0))
         let motive = Term.constantMotive(scrutineeType: falseType, returnType: .universe(0))
         let absurdMatch = Term.match(scrutinee: .variable("f"), motive: motive, cases: [:])
 
@@ -597,11 +610,7 @@ final class InductiveTypesTests: XCTestCase {
 
         XCTAssertThrowsError(
             try env.add(
-                Declaration(
-                    name: "succ",
-                    kind: .constructor,
-                    type: Term.pi(param: "n", type: nat, body: nat)
-                )
+                Declaration(name: "succ", kind: .constructor, type: succType)
             )
         ) { error in
             XCTAssertEqual(

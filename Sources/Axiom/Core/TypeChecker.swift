@@ -78,10 +78,6 @@ public struct TypeChecker {
         environment: [String: Term],
         expectedType: Term?
     ) throws -> Term {
-        if term.role == .declaration {
-            return try typeCheckDeclaration(term: term, environment: environment)
-        }
-
         switch term {
         case .variable(let name):
             if let localType = environment[name] {
@@ -472,41 +468,6 @@ public struct TypeChecker {
         }
     }
 
-    private mutating func typeCheckDeclaration(
-        term: Term,
-        environment: [String: Term]
-    ) throws -> Term {
-        switch term {
-        case .inductive(let name, let sort):
-            let sortType = try typeCheck(term: sort, environment: environment)
-            _ = try expectUniverseLevel(of: sort, inferredType: sortType)
-            let declaration = Declaration(name: name, kind: .inductive, type: sort)
-            if declarations.lookup(name) == nil {
-                try registerDeclaration(declaration)
-            }
-            return sort
-
-        case .constructor(let constructorName, let inductiveName, let type):
-            _ = try typeCheck(term: type, environment: environment)
-            guard constructorReturnsInductive(type, inductiveName: inductiveName) else {
-                throw TypeError.invalidConstructorTarget(expected: inductiveName, actual: type)
-            }
-            try checkConstructorRegistration(inductiveName: inductiveName, constructorType: type)
-            let declaration = Declaration(
-                name: constructorName,
-                kind: .constructor,
-                type: type
-            )
-            if declarations.lookup(constructorName) == nil {
-                try registerDeclaration(declaration)
-            }
-            return type
-
-        default:
-            return try typeCheck(term: term, environment: environment)
-        }
-    }
-
     private func constructorReturnsInductive(_ type: Term, inductiveName: String) -> Bool {
         guard let head = InductiveFamily.codomainHead(type) else {
             return false
@@ -844,7 +805,7 @@ public struct TypeChecker {
         if constructorParamNames.contains(motiveParam),
            case .abstraction(let param, let paramType, let body) = motive,
            param == motiveParam {
-            let fresh = freshBinderName(
+            let fresh = Term.freshName(
                 avoiding: constructorParamNames
                     .union(instance.freeVariables)
                     .union(motive.freeVariables)
@@ -857,15 +818,6 @@ public struct TypeChecker {
         }
 
         return Term.application(function: workingMotive, argument: instance)
-    }
-
-    private func freshBinderName(avoiding used: Set<String>) -> String {
-        var index = 0
-        while true {
-            let candidate = "$m\(index)"
-            if !used.contains(candidate) { return candidate }
-            index += 1
-        }
     }
 
     private mutating func expectedMatchBranchType(
@@ -916,7 +868,13 @@ public struct TypeChecker {
         switch motiveInstance {
         case .universe, .pi, .application:
             return motiveInstance
-        case .variable:
+        case .variable(let name):
+            if environment[name] != nil {
+                return try typeCheck(term: motiveInstance, environment: environment)
+            }
+            if declarations.lookup(name) != nil {
+                return motiveInstance
+            }
             return try typeCheck(term: motiveInstance, environment: environment)
         default:
             return motiveInstance

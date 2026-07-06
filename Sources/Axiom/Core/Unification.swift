@@ -76,7 +76,7 @@ public struct Unifier {
 
         case (.pi(let p1, let ty1, let b1), .pi(let p2, let ty2, let b2)):
             try unifyNormalized(ty1, ty2, conversion: conversion, unfolding: unfolding, context: &context)
-            let fresh = freshName(
+            let fresh = Term.freshName(
                 avoiding: b1.allVariableNames
                     .union(b2.allVariableNames)
                     .union(Set(context.keys))
@@ -88,7 +88,7 @@ public struct Unifier {
 
         case (.abstraction(let p1, let ty1, let b1), .abstraction(let p2, let ty2, let b2)):
             try unifyNormalized(ty1, ty2, conversion: conversion, unfolding: unfolding, context: &context)
-            let fresh = freshName(
+            let fresh = Term.freshName(
                 avoiding: b1.allVariableNames
                     .union(b2.allVariableNames)
                     .union(Set(context.keys))
@@ -224,15 +224,6 @@ public struct Unifier {
 
     private static func structurallyEqual(_ t1: Term, _ t2: Term) -> Bool {
         t1 == t2
-    }
-
-    private static func freshName(avoiding used: Set<String>) -> String {
-        var index = 0
-        while true {
-            let candidate = "$u\(index)"
-            if !used.contains(candidate) { return candidate }
-            index += 1
-        }
     }
 }
 
