@@ -135,7 +135,7 @@ public struct TypeChecker {
             let reducedFunctionType = try conversion.normalize(
                 instantiateHoles(in: functionType),
                 budget: &reductionBudget,
-                unfolding: reductionUnfolding()
+                unfolding: typeUnfolding()
             )
             guard case .pi(let param, let domain, let codomain) = reducedFunctionType else {
                 throw TypeError.notAFunction(function, functionType)
@@ -146,7 +146,7 @@ public struct TypeChecker {
                 in: try conversion.normalize(
                     codomain.substituting(name: param, with: argument),
                     budget: &reductionBudget,
-                    unfolding: reductionUnfolding()
+                    unfolding: typeUnfolding()
                 )
             )
 
@@ -159,22 +159,23 @@ public struct TypeChecker {
                 environment: environment,
                 expectedType: nil
             )
-            guard let inductiveName = try inductiveHead(of: scrutineeType) else {
+            guard let eliminationTarget = try eliminationTarget(of: scrutineeType) else {
                 throw TypeError.notInductive(scrutinee, scrutineeType)
             }
+            let inductiveName = eliminationTarget.name
             guard declarations.isInductiveClosed(inductiveName) else {
                 throw TypeError.inductiveNotClosed(inductiveName)
             }
             let normalizedScrutineeType = try conversion.normalize(
                 instantiateHoles(in: scrutineeType),
                 budget: &reductionBudget,
-                unfolding: reductionUnfolding()
+                unfolding: typeUnfolding()
             )
             let motiveType = try typeCheck(term: motive, environment: environment)
             let normalizedMotiveType = try conversion.normalize(
                 instantiateHoles(in: motiveType),
                 budget: &reductionBudget,
-                unfolding: reductionUnfolding()
+                unfolding: typeUnfolding()
             )
             guard case .pi(let motiveParam, let motiveDomain, let motiveCodomain) = normalizedMotiveType else {
                 throw TypeError.motiveMismatch(expected: normalizedScrutineeType, actual: motiveType)
@@ -204,7 +205,8 @@ public struct TypeChecker {
                     inductiveName: inductiveName,
                     constructorType: constructor.type,
                     motive: motive,
-                    motiveParam: motiveParam
+                    motiveParam: motiveParam,
+                    environment: environment
                 )
                 if peelPiParams(from: constructor.type).isEmpty {
                     try checkTermMatchesType(
@@ -391,7 +393,7 @@ public struct TypeChecker {
             normalizedExpected,
             normalizedActual,
             budget: &reductionBudget,
-            unfolding: reductionUnfolding()
+            unfolding: typeUnfolding()
         ) else {
             throw TypeError.typeMismatch(expected: expected, actual: actual)
         }
@@ -405,7 +407,7 @@ public struct TypeChecker {
             normalizedExpected,
             normalizedActual,
             budget: &reductionBudget,
-            unfolding: reductionUnfolding()
+            unfolding: typeUnfolding()
         ) {
             return
         }
@@ -413,7 +415,7 @@ public struct TypeChecker {
             try Unifier.unify(
                 normalizedExpected,
                 normalizedActual,
-                unfolding: reductionUnfolding(),
+                unfolding: typeUnfolding(),
                 context: &metavariables
             )
         } catch is UnificationError {
@@ -425,7 +427,7 @@ public struct TypeChecker {
         try conversion.normalize(
             instantiateHoles(in: term),
             budget: &reductionBudget,
-            unfolding: reductionUnfolding()
+            unfolding: typeUnfolding()
         )
     }
 
@@ -436,22 +438,29 @@ public struct TypeChecker {
         return level
     }
 
-    private mutating func inductiveHead(of type: Term) throws -> String? {
-        let normalized = try conversion.normalize(
-            instantiateHoles(in: type),
-            budget: &reductionBudget,
-            unfolding: reductionUnfolding()
-        )
-        if case .inductive(let name, _) = normalized {
-            return name
+    private mutating func eliminationTarget(of type: Term) throws -> (name: String, indices: [Term])? {
+        let normalized = try normalizedForComparison(type)
+        guard let target = InductiveFamily.eliminationTarget(from: normalized) else {
+            return nil
         }
-        if case .constructor(_, let inductiveName, _) = normalized {
-            return inductiveName
+        guard isRegisteredEliminationFamily(target.name) else {
+            return nil
         }
-        if case .pi(_, _, let body) = normalized {
-            return try inductiveHead(of: body)
+        return target
+    }
+
+    private func isRegisteredEliminationFamily(_ name: String) -> Bool {
+        guard let declaration = declarations.lookup(name) else {
+            return false
         }
-        return nil
+        switch declaration.kind {
+        case .inductive:
+            return true
+        case .definition, .constant, .theorem:
+            return InductiveFamily.isIndexedFamilyType(declaration.type)
+        case .axiom, .constructor:
+            return false
+        }
     }
 
     private mutating func typeCheckDeclaration(
@@ -490,14 +499,10 @@ public struct TypeChecker {
     }
 
     private func constructorReturnsInductive(_ type: Term, inductiveName: String) -> Bool {
-        var current = type
-        while case .pi(_, _, let body) = current {
-            current = body
+        guard let head = InductiveFamily.codomainHead(type) else {
+            return false
         }
-        if case .inductive(let name, _) = current {
-            return name == inductiveName
-        }
-        return false
+        return head.name == inductiveName
     }
 
     /// Verifies strict positivity for constructor types registered against an inductive.
@@ -547,14 +552,23 @@ public struct TypeChecker {
     }
 
     private func inductiveLevel(for inductiveName: String) throws -> Int {
-        guard let declaration = declarations.lookup(inductiveName),
-              declaration.kind == .inductive else {
+        guard let declaration = declarations.lookup(inductiveName) else {
             throw TypeError.unknownInductive(inductiveName)
         }
-        guard case .universe(let level) = declaration.type else {
-            throw TypeError.invalidInductiveSort(inductiveName, declaration.type)
+        switch declaration.kind {
+        case .inductive:
+            guard case .universe(let level) = declaration.type else {
+                throw TypeError.invalidInductiveSort(inductiveName, declaration.type)
+            }
+            return level
+        case .definition, .constant, .theorem:
+            guard let level = InductiveFamily.familyUniverseLevel(declaration.type) else {
+                throw TypeError.invalidInductiveSort(inductiveName, declaration.type)
+            }
+            return level
+        case .axiom, .constructor:
+            throw TypeError.unknownInductive(inductiveName)
         }
-        return level
     }
 
     /// Verifies strict positivity and predicative universes for every constructor.
@@ -690,6 +704,9 @@ public struct TypeChecker {
             guard let value = declaration.value else { continue }
             switch declaration.kind {
             case .definition, .theorem, .constant:
+                if InductiveFamily.isIndexedFamilyType(declaration.type) {
+                    continue
+                }
                 unfolding[declaration.name] = value
                 unfolding[declaration.qualifiedName] = value
             case .axiom, .inductive, .constructor:
@@ -699,9 +716,13 @@ public struct TypeChecker {
         return unfolding
     }
 
+    private func typeUnfolding() -> [String: Term] {
+        transparentDefinitions()
+    }
+
     /// δ-definitions plus registered constructor heads for match reduction and conversion.
     private func reductionUnfolding() -> [String: Term] {
-        var unfolding = transparentDefinitions()
+        var unfolding = typeUnfolding()
         for declaration in declarations.allDeclarations where declaration.kind == .constructor {
             guard let inductiveName = inductiveName(inConstructorType: declaration.type) else { continue }
             let head = Term.constructor(
@@ -716,14 +737,7 @@ public struct TypeChecker {
     }
 
     private func inductiveName(inConstructorType type: Term) -> String? {
-        var current = type
-        while case .pi(_, _, let body) = current {
-            current = body
-        }
-        if case .inductive(let name, _) = current {
-            return name
-        }
-        return nil
+        InductiveFamily.codomainHead(type)?.name
     }
 
     // MARK: - Match elimination
@@ -771,7 +785,7 @@ public struct TypeChecker {
         let normalized = try conversion.normalize(
             instantiateHoles(in: expected),
             budget: &reductionBudget,
-            unfolding: reductionUnfolding()
+            unfolding: typeUnfolding()
         )
         guard case .pi(_, let domain, let body) = normalized else { return nil }
         do {
@@ -850,23 +864,53 @@ public struct TypeChecker {
         inductiveName: String,
         constructorType: Term,
         motive: Term,
-        motiveParam: String
+        motiveParam: String,
+        environment: [String: Term]
     ) throws -> Term {
         let parameters = peelPiParams(from: constructorType)
+        var branchEnvironment = environment
+        for (param, domain) in parameters {
+            branchEnvironment[param] = domain
+        }
         let instance = constructorInstance(
             constructorName: constructorName,
             inductiveName: inductiveName,
             parameters: parameters
         )
-        var result = applyMotive(
+        let motiveInstance = applyMotive(
             motive,
             motiveParam: motiveParam,
             to: instance,
             constructorParameters: parameters
         )
+        let normalizedMotiveInstance = try conversion.normalize(
+            instantiateHoles(in: motiveInstance),
+            budget: &reductionBudget,
+            unfolding: typeUnfolding()
+        )
+        let branchBodyType = try motiveBranchTargetType(
+            normalizedMotiveInstance,
+            environment: branchEnvironment
+        )
+        var branchType = branchBodyType
         for (param, domain) in parameters.reversed() {
-            result = .pi(param: param, type: domain, body: result)
+            branchType = .pi(param: param, type: domain, body: branchType)
         }
-        return result
+        return branchType
+    }
+
+    /// Type expected for a match branch after applying the motive to a constructor instance.
+    private mutating func motiveBranchTargetType(
+        _ motiveInstance: Term,
+        environment: [String: Term]
+    ) throws -> Term {
+        switch motiveInstance {
+        case .universe, .pi, .application:
+            return motiveInstance
+        case .variable:
+            return try typeCheck(term: motiveInstance, environment: environment)
+        default:
+            return motiveInstance
+        }
     }
 }

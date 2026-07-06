@@ -92,7 +92,7 @@ final class PositivityTests: XCTestCase {
     }
 
     func testDeclarationEnvironmentRejectsVariableConstructorCodomain() {
-        let constructorType = Term.pi(param: "x", type: .universe(0), body: .variable("Bad"))
+        let constructorType = Term.pi(param: "x", type: nat, body: .universe(0))
 
         var env = DeclarationEnvironment()
         XCTAssertNoThrow(try env.add(Declaration(name: "Bad", kind: .inductive, type: .universe(0))))

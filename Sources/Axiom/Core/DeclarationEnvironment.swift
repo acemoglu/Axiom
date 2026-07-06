@@ -114,23 +114,33 @@ public struct DeclarationEnvironment: Equatable, Sendable {
     }
 
     private func inductiveLevel(for inductiveName: String) -> Int? {
-        guard let declaration = declarationsByName[inductiveName],
-              declaration.kind == .inductive,
-              case .universe(let level) = declaration.type else {
+        guard let declaration = declarationsByName[inductiveName] else {
             return nil
         }
-        return level
+        switch declaration.kind {
+        case .inductive:
+            guard case .universe(let level) = declaration.type else { return nil }
+            return level
+        case .definition, .constant, .theorem:
+            return InductiveFamily.familyUniverseLevel(declaration.type)
+        case .axiom, .constructor:
+            return nil
+        }
     }
 
     private func inductiveName(inConstructorType type: Term) -> String? {
-        var current = type
-        while case .pi(_, _, let body) = current {
-            current = body
+        InductiveFamily.codomainHead(type)?.name
+    }
+
+    private func isEliminableFamily(_ declaration: Declaration) -> Bool {
+        switch declaration.kind {
+        case .inductive:
+            return true
+        case .definition, .constant, .theorem:
+            return InductiveFamily.isIndexedFamilyType(declaration.type)
+        case .axiom, .constructor:
+            return false
         }
-        if case .inductive(let name, _) = current {
-            return name
-        }
-        return nil
     }
 
     public func lookup(_ name: String) -> Declaration? {
@@ -155,9 +165,10 @@ public struct DeclarationEnvironment: Equatable, Sendable {
         closedInductives.contains(inductiveName)
     }
 
-    /// Finalizes an inductive block: batch strict-positivity over all constructors, then marks closed.
+    /// Finalizes an inductive or indexed-family block, then marks it closed.
     public mutating func closeInductive(_ inductiveName: String) throws {
-        guard declarationsByName[inductiveName]?.kind == .inductive else {
+        guard let declaration = declarationsByName[inductiveName],
+              isEliminableFamily(declaration) else {
             throw DeclarationEnvironmentError.unknownInductive(inductiveName)
         }
         guard !closedInductives.contains(inductiveName) else {
