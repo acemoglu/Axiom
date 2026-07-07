@@ -14,31 +14,117 @@
 ///        | ?m                              (metavariable / hole)
 /// ```
 ///
-/// ## Representation: hash-consing
+/// ## Representation: arena-backed hash-consing + de Bruijn (locally nameless)
 ///
-/// `Term` is a reference type whose instances are **interned** by ``TermPool``: every
-/// call to a factory (``Term/variable(_:)``, ``Term/application(function:argument:)``, …)
-/// looks up a global table keyed by structural shape and returns the *existing* instance
-/// when one already exists, rather than allocating a new node. Consequences:
+/// `Term` is a lightweight `Int32` handle into a process-wide ``TermArena`` slab: each
+/// canonical node is a dense ``TermData`` record (tagged union with child indices, cached
+/// free-variable sets) stored contiguously, not a separately heap-allocated `final class`.
+/// Every call to a factory (``Term/variable(_:)``, ``Term/application(function:argument:)``,
+/// …) looks up a global hash-cons table keyed by structural shape and returns the *existing*
+/// handle when one already exists; on a miss it appends one slab entry. Consequences:
 ///
-/// - **O(1) definitional/structural equality.** Two structurally-equal terms are always
-///   the same instance, so `==` is pointer comparison — no AST walk.
-/// - **O(1) hashing.** ``hash(into:)`` combines a small interned integer id, not the tree.
-/// - **Shared substructure.** Identical subterms (e.g. `Type₀` used a thousand times) are
-///   stored once; the retain/release traffic and cache-miss cost of a deep AST is bounded
-///   by the number of *distinct* subterms, not the number of *occurrences*.
+/// - **O(1) definitional/structural equality.** Two structurally-equal terms share the same
+///   `internID`, so `==` is integer comparison — no AST walk, no pointer chase.
+/// - **O(1) hashing.** ``hash(into:)`` combines the intern id, not the tree.
+/// - **Shared substructure + cache locality.** Identical subterms are stored once; walking
+///   an AST touches a dense array instead of chasing scattered heap objects.
+/// - **No per-node ARC.** Fresh/unique node creation appends to the arena instead of paying
+///   `swift_allocObject` retain/release on every factory call.
+///
+/// Bound variables (the parameter of a ``Kind/pi`` or ``Kind/abstraction``) are represented
+/// **positionally** as de Bruijn indices (``Kind/boundVariable``), not by name. Only truly
+/// free variables — context-bound locals during checking, and global declaration names —
+/// use ``Kind/variable``. Each binder still carries a `hint: String` purely for display and
+/// for choosing a name when a binder is *opened* (see ``instantiated(with:)``); the hint is
+/// **not** part of a binder's structural identity (see below), so it plays no role in
+/// equality, hashing, or substitution.
+///
+/// This "locally nameless" design is what makes hash-consing double as an **alpha-
+/// equivalence** cache: two binders that differ only in their bound-variable's surface name
+/// abstract to the *exact same* de Bruijn body, so they intern to the *same* `Term`
+/// instance. `Term.==`/`alphaEquivalent` are therefore always intern-id comparison — never
+/// a deep structural fallback (see ``TermPool``'s `InternKey`, which deliberately omits
+/// `hint` from the pi/abstraction hash and equality).
+///
+/// It also removes the historical source of quadratic blowup in substitution: because a
+/// bound occurrence is a plain integer, substituting into (or under) a binder never needs
+/// capture-avoidance renaming — no "is this name already used anywhere in this subtree"
+/// search, no generating a fresh name, no re-walking the term a second time to apply that
+/// rename. ``instantiated(with:)`` (open a binder — used for both β-reduction and, when
+/// opening with a fresh local variable, for name-based type checking) is a single O(size
+/// actually touched) walk with no name bookkeeping at all.
 ///
 /// Derived per-node facts that would otherwise require a full re-traversal — free term
 /// variables, free metavariables, all mentioned names — are computed **once**, at
 /// construction, from the (already-computed) facts of a node's children, and cached as
 /// stored properties. Because children are always already-interned/-cached `Term`s by the
 /// time a parent is built, this is O(children) per node, not O(subtree).
-public final class Term {
+public struct Term: Equatable, Hashable, Sendable {
 
-    /// Structural payload. Never construct a `Kind` directly outside ``TermPool``; use the
-    /// `Term` factory methods below so every node is hash-consed.
+    /// Hash-consing identity assigned by ``TermArena``, unique per canonical structural
+    /// shape (up to alpha-equivalence — see ``TermPool``'s intern key). Backs both
+    /// `Hashable` and the O(1) fast path of `==`.
+    let internID: Int32
+
+    /// This node's structural payload (reconstructed from the arena slab on demand).
+    public var kind: Kind {
+        TermArena.shared.kind(for: internID)
+    }
+
+    /// Term variables (``Kind/variable``) free in this term; metavariables (``Kind/hole``)
+    /// and bound variables (``Kind/boundVariable``) are excluded. Cached in the arena —
+    /// O(1) to read.
+    public var freeVariables: Set<String> {
+        TermArena.shared.freeVariables(for: internID)
+    }
+
+    /// Metavariables (``Kind/hole``) free in this term; term variables are excluded.
+    /// Cached in the arena — O(1) to read.
+    public var freeMetavariables: Set<String> {
+        TermArena.shared.freeMetavariables(for: internID)
+    }
+
+    /// Whether a ``Kind/match`` node occurs anywhere in this subtree. Cached in the arena;
+    /// backs ``isGloballyCacheable``.
+    var containsMatch: Bool {
+        TermArena.shared.containsMatch(for: internID)
+    }
+
+    /// A term is safe to memoize **globally** (across every `TypeChecker`/declaration
+    /// environment, forever) exactly when its inferred type cannot possibly depend on
+    /// ambient context:
+    ///
+    /// - No free term variables ⇒ never consults `environment` or `declarations.lookup`.
+    /// - No free metavariables ⇒ never consults `TypeChecker.metavariables`.
+    /// - No ``Kind/match`` node ⇒ never consults `declarations` for inductive/constructor
+    ///   registration (the one place a *structurally closed* term can still read global,
+    ///   mutable checker state).
+    ///
+    /// Under all three, `typeCheck(term:)` is a pure function of `term`'s structure alone.
+    public var isGloballyCacheable: Bool {
+        freeVariables.isEmpty && freeMetavariables.isEmpty && !containsMatch
+    }
+
+    /// Structural payload tag. Never construct a `Kind` directly outside ``TermPool``; use
+    /// the `Term` factory methods below so every node is hash-consed.
+    ///
+    /// Internal invariant: a `Term` built exclusively through the factories below never has
+    /// a "dangling" ``boundVariable`` — every one is bound by an enclosing ``pi``/
+    /// ``abstraction`` at the correct depth. Code that pattern-matches `Kind` directly
+    /// (rather than going through ``instantiated(with:)``) must never treat a bare
+    /// ``boundVariable`` as if it were a name; if a caller needs to inspect a binder's body
+    /// by name (e.g. to key a typing environment), it must first open it with
+    /// `body.instantiated(with: .variable(hint))`.
     public enum Kind {
+        /// A **free** variable: a name resolved against an ambient typing environment or
+        /// the global declaration table. Never bound by a Π/λ — see ``boundVariable`` for
+        /// that.
         case variable(String)
+
+        /// A **bound** variable, referenced by de Bruijn index: `0` is "the variable
+        /// introduced by the nearest enclosing binder", `1` the next one out, etc. Only
+        /// ever appears nested inside the `body` of a ``pi``/``abstraction`` that binds it.
+        case boundVariable(Int)
 
         /// A **metavariable** (hole) to be solved by unification during type inference.
         ///
@@ -51,10 +137,14 @@ public final class Term {
         case universe(Int)
 
         /// *Π(x:A). B* — dependent function type.
-        case pi(param: String, type: Term, body: Term)
+        ///
+        /// `hint` is the surface name shown when this binder is opened; it is **not**
+        /// consulted by equality/hashing. `body` is de Bruijn-indexed: occurrences of this
+        /// binder's own variable inside it are ``boundVariable(0)`` (relative to `body`).
+        case pi(hint: String, type: Term, body: Term)
 
-        /// *λx:A. t* — introduction for Π.
-        case abstraction(param: String, type: Term, body: Term)
+        /// *λx:A. t* — introduction for Π. Same de Bruijn convention as ``pi``.
+        case abstraction(hint: String, type: Term, body: Term)
 
         /// *t u* — elimination for Π.
         case application(function: Term, argument: Term)
@@ -85,65 +175,9 @@ public final class Term {
         /// constructor *c*.
         case match(scrutinee: Term, motive: Term, cases: [String: Term])
     }
-
-    /// This node's structural payload.
-    public let kind: Kind
-
-    /// Hash-consing identity assigned by ``TermPool``, unique per canonical structural
-    /// shape. Backs both `Hashable` and the O(1) fast path of `==`.
-    let internID: Int
-
-    /// Term variables (``Kind/variable``) free in this term; metavariables (``Kind/hole``)
-    /// are excluded. Cached at construction — O(1) to read.
-    public let freeVariables: Set<String>
-
-    /// Metavariables (``Kind/hole``) free in this term; term variables are excluded.
-    /// Cached at construction — O(1) to read.
-    public let freeMetavariables: Set<String>
-
-    /// Every variable/hole name syntactically mentioned (bound or free); used to pick
-    /// binder names that are fresh throughout a term. Cached at construction.
-    let allVariableNames: Set<String>
-
-    /// Whether a ``Kind/match`` node occurs anywhere in this subtree. Cached at
-    /// construction; backs ``isGloballyCacheable``.
-    let containsMatch: Bool
-
-    /// Only ``TermPool`` may construct raw nodes — everyone else goes through the factory
-    /// methods below, which guarantees every live `Term` is hash-consed.
-    init(
-        kind: Kind,
-        internID: Int,
-        freeVariables: Set<String>,
-        freeMetavariables: Set<String>,
-        allVariableNames: Set<String>,
-        containsMatch: Bool
-    ) {
-        self.kind = kind
-        self.internID = internID
-        self.freeVariables = freeVariables
-        self.freeMetavariables = freeMetavariables
-        self.allVariableNames = allVariableNames
-        self.containsMatch = containsMatch
-    }
-
-    /// A term is safe to memoize **globally** (across every `TypeChecker`/declaration
-    /// environment, forever) exactly when its inferred type cannot possibly depend on
-    /// ambient context:
-    ///
-    /// - No free term variables ⇒ never consults `environment` or `declarations.lookup`.
-    /// - No free metavariables ⇒ never consults `TypeChecker.metavariables`.
-    /// - No ``Kind/match`` node ⇒ never consults `declarations` for inductive/constructor
-    ///   registration (the one place a *structurally closed* term can still read global,
-    ///   mutable checker state).
-    ///
-    /// Under all three, `typeCheck(term:)` is a pure function of `term`'s structure alone.
-    public var isGloballyCacheable: Bool {
-        freeVariables.isEmpty && freeMetavariables.isEmpty && !containsMatch
-    }
 }
 
-// MARK: - Hash-consed construction
+// MARK: - Hash-consed construction (public, name-based surface API)
 
 extension Term {
 
@@ -159,12 +193,41 @@ extension Term {
         TermPool.shared.intern(.universe(level))
     }
 
+    /// Builds *Π(param:type). body*. `body` is given **named** — written using ordinary
+    /// ``variable(_:)`` occurrences of `param`, exactly as every call site already does —
+    /// and is converted to the de Bruijn representation once, here, by abstracting `param`
+    /// out of it (see ``abstracting(_:)``). Callers never need to think about indices.
     public static func pi(param: String, type: Term, body: Term) -> Term {
-        TermPool.shared.intern(.pi(param: param, type: type, body: body))
+        rawPi(hint: param, type: type, body: body.abstracting(param))
     }
 
+    /// Builds *λ(param:type). body*. See ``pi(param:type:body:)`` for the naming convention.
     public static func abstraction(param: String, type: Term, body: Term) -> Term {
-        TermPool.shared.intern(.abstraction(param: param, type: type, body: body))
+        if body.freeVariables.contains(param) {
+            return rawAbstraction(hint: param, type: type, body: body.abstracting(param))
+        }
+        let shiftedBody = TermArena.shared.maxBoundIndex(for: body.internID) >= 0
+            ? body.shifted(by: 1, cutoff: 0)
+            : body
+        return rawAbstraction(hint: param, type: type, body: shiftedBody)
+    }
+
+    /// Builds a left-nested `λ h₀:T. λ h₁:T. …` chain in O(depth) without a final
+    /// O(depth) name-abstraction sweep. `freeBody` is the innermost body before the
+    /// innermost binder (typically a free reference to the variable that will become
+    /// the outermost parameter).
+    public static func curriedAbstractions(hints: [String], type: Term, freeBody: Term) -> Term {
+        var body = freeBody
+        for hint in hints.reversed() {
+            if body.freeVariables.contains(hint) {
+                body = rawAbstraction(hint: hint, type: type, body: body.abstracting(hint))
+            } else if TermArena.shared.maxBoundIndex(for: body.internID) >= 0 {
+                body = rawAbstraction(hint: hint, type: type, body: body.shifted(by: 1, cutoff: 0))
+            } else {
+                body = rawAbstraction(hint: hint, type: type, body: body)
+            }
+        }
+        return body
     }
 
     public static func application(function: Term, argument: Term) -> Term {
@@ -184,26 +247,31 @@ extension Term {
     }
 }
 
-// MARK: - Fast-path equality and hashing
+// MARK: - Raw (de Bruijn-preserving) construction — internal use only
 
-extension Term: Equatable {
+extension Term {
 
-    /// O(1). Sound *only* because every `Term` is constructed through ``TermPool``: two
-    /// structurally-equal terms are always the exact same instance, so pointer identity
-    /// **is** definitional/structural equality here — there is no deep fallback to bypass.
-    public static func == (lhs: Term, rhs: Term) -> Bool {
-        lhs === rhs
+    /// Interns a bound-variable node directly. Never call with an index that would be
+    /// "dangling" (unbound by any enclosing ``pi``/``abstraction``) in the term you're
+    /// building — this is a private primitive for ``abstracting(_:)``/``shifted(by:cutoff:)``/
+    /// ``instantiated(with:)`` only.
+    static func rawBoundVariable(_ index: Int) -> Term {
+        TermArena.shared.intern(TermKindStorage.boundVariable(index))
+    }
+
+    static func rawPi(hint: String, type: Term, body: Term) -> Term {
+        TermArena.shared.intern(TermKindStorage.pi(hint: hint, type: type.internID, body: body.internID))
+    }
+
+    static func rawAbstraction(hint: String, type: Term, body: Term) -> Term {
+        TermArena.shared.intern(TermKindStorage.abstraction(hint: hint, type: type.internID, body: body.internID))
+    }
+
+    @inline(__always)
+    static func child(_ id: Int32) -> Term {
+        Term(internID: id)
     }
 }
-
-extension Term: Hashable {
-    public func hash(into hasher: inout Hasher) {
-        hasher.combine(internID)
-    }
-}
-
-/// Immutable after construction and internally synchronized via ``TermPool``'s lock.
-extension Term: @unchecked Sendable {}
 
 /// High-level role classification used by the kernel boundary.
 public enum TermRole: Equatable, Sendable {
@@ -211,7 +279,188 @@ public enum TermRole: Equatable, Sendable {
     case declaration
 }
 
-// MARK: - Free variables and capture-avoiding substitution
+// MARK: - De Bruijn primitives: shift / abstract / instantiate
+
+extension Term {
+
+    /// Adds `amount` to every ``Kind/boundVariable`` at or above `cutoff` (the number of
+    /// binders already crossed). Used only internally, when a term is moved into a deeper
+    /// (or shallower) binding context than the one it was built in — e.g. re-aligning a
+    /// substituted replacement's own bound variables when it is inserted `cutoff` binders
+    /// deep by ``instantiated(with:)``.
+    ///
+    /// O(size actually touched): subtrees with no bound variable at or above `cutoff` are
+    /// impossible to detect purely from a cached set (unlike free/meta variables, bound
+    /// variables aren't tracked per-node — there are usually only 0–2 in the terms this
+    /// runs on, e.g. a single free variable or argument term), so this is a plain recursive
+    /// walk. It only recurses into terms that are actually substituted in — never into
+    /// unrelated large subtrees — so it never reintroduces the quadratic blowup shifting is
+    /// designed to avoid.
+    private func shifted(by amount: Int, cutoff: Int = 0) -> Term {
+        guard amount != 0 else { return self }
+        if TermArena.shared.maxBoundIndex(for: internID) < cutoff {
+            return self
+        }
+        switch TermArena.shared.storage(for: internID) {
+        case .boundVariable(let index):
+            return index >= cutoff ? .rawBoundVariable(index + amount) : self
+        case .variable, .hole, .universe:
+            return self
+        case .application(let function, let argument):
+            return TermArena.shared.intern(TermKindStorage.application(
+                function: Term.child(function).shifted(by: amount, cutoff: cutoff).internID,
+                argument: Term.child(argument).shifted(by: amount, cutoff: cutoff).internID
+            ))
+        case .pi(let hint, let type, let body):
+            return TermArena.shared.intern(TermKindStorage.pi(
+                hint: hint,
+                type: Term.child(type).shifted(by: amount, cutoff: cutoff).internID,
+                body: Term.child(body).shifted(by: amount, cutoff: cutoff + 1).internID
+            ))
+        case .abstraction(let hint, let type, let body):
+            return TermArena.shared.intern(TermKindStorage.abstraction(
+                hint: hint,
+                type: Term.child(type).shifted(by: amount, cutoff: cutoff).internID,
+                body: Term.child(body).shifted(by: amount, cutoff: cutoff + 1).internID
+            ))
+        case .inductive(let name, let type):
+            return TermArena.shared.intern(TermKindStorage.inductive(
+                name: name,
+                type: Term.child(type).shifted(by: amount, cutoff: cutoff).internID
+            ))
+        case .constructor(let name, let inductiveName, let type):
+            return TermArena.shared.intern(TermKindStorage.constructor(
+                name: name,
+                inductiveName: inductiveName,
+                type: Term.child(type).shifted(by: amount, cutoff: cutoff).internID
+            ))
+        case .match(let scrutinee, let motive, let cases):
+            return TermArena.shared.intern(TermKindStorage.match(
+                scrutinee: Term.child(scrutinee).shifted(by: amount, cutoff: cutoff).internID,
+                motive: Term.child(motive).shifted(by: amount, cutoff: cutoff).internID,
+                cases: Dictionary(uniqueKeysWithValues: cases.map {
+                    ($0.key, Term.child($0.value).shifted(by: amount, cutoff: cutoff).internID)
+                })
+            ))
+        }
+    }
+
+    /// Converts every **free** occurrence of `name` into a ``Kind/boundVariable`` pointing
+    /// at the binder about to be built around `self` (index `depth`, incrementing as we
+    /// descend under further binders). This is the one-time cost of constructing a new
+    /// binder via ``pi(param:type:body:)``/``abstraction(param:type:body:)``: no capture
+    /// avoidance is needed (there is nothing to capture — bound and free variables live in
+    /// disjoint namespaces once this returns), and the cached ``freeVariables`` set lets
+    /// subtrees that don't mention `name` short-circuit in O(1) without being walked.
+    fileprivate func abstracting(_ name: String, depth: Int = 0) -> Term {
+        guard freeVariables.contains(name) else { return self }
+        switch kind {
+        case .variable(let variableName):
+            return variableName == name ? .rawBoundVariable(depth) : self
+        case .boundVariable, .hole, .universe:
+            return self
+        case .application(let function, let argument):
+            return .application(
+                function: function.abstracting(name, depth: depth),
+                argument: argument.abstracting(name, depth: depth)
+            )
+        case .pi(let hint, let type, let body):
+            return .rawPi(
+                hint: hint,
+                type: type.abstracting(name, depth: depth),
+                body: body.abstracting(name, depth: depth + 1)
+            )
+        case .abstraction(let hint, let type, let body):
+            return .rawAbstraction(
+                hint: hint,
+                type: type.abstracting(name, depth: depth),
+                body: body.abstracting(name, depth: depth + 1)
+            )
+        case .inductive(let inductiveName, let type):
+            return .inductive(name: inductiveName, type: type.abstracting(name, depth: depth))
+        case .constructor(let constructorName, let inductiveName, let type):
+            return .constructor(
+                name: constructorName,
+                inductiveName: inductiveName,
+                type: type.abstracting(name, depth: depth)
+            )
+        case .match(let scrutinee, let motive, let cases):
+            return .match(
+                scrutinee: scrutinee.abstracting(name, depth: depth),
+                motive: motive.abstracting(name, depth: depth),
+                cases: cases.mapValues { $0.abstracting(name, depth: depth) }
+            )
+        }
+    }
+
+    /// **Opens** the binder that would enclose `self`: replaces ``Kind/boundVariable(0)``
+    /// (relative to `self`) with `replacement`, and decrements every deeper bound variable
+    /// by one (there is now one fewer enclosing binder). This is the single primitive
+    /// behind:
+    ///
+    /// - **β-reduction**: `(λx:A. body) arg` reduces to `body.instantiated(with: arg)` —
+    ///   directly, with no name chosen and no separate substitution pass.
+    /// - **Opening a binder for name-based checking**: `body.instantiated(with:
+    ///   .variable(hint))` reconstructs exactly the named term a caller would have gotten
+    ///   from pattern-matching a pre-de-Bruijn `Term` — safe to feed into any
+    ///   environment-keyed (`[String: Term]`) logic unchanged.
+    ///
+    /// Neither use case does any name comparison, freshness search, or variable-name-set
+    /// union: this is why de Bruijn indices remove the quadratic capture-avoidance cost
+    /// that named substitution paid on every deeply-nested binder chain. The whole
+    /// operation is a single O(size actually touched) walk.
+    func instantiated(with replacement: Term) -> Term {
+        substitutingBoundVariable(0, with: replacement)
+    }
+
+    private func substitutingBoundVariable(_ target: Int, with replacement: Term) -> Term {
+        switch TermArena.shared.storage(for: internID) {
+        case .boundVariable(let index):
+            if index == target { return replacement.shifted(by: target) }
+            return index > target ? .rawBoundVariable(index - 1) : self
+        case .variable, .hole, .universe:
+            return self
+        case .application(let function, let argument):
+            return TermArena.shared.intern(TermKindStorage.application(
+                function: Term.child(function).substitutingBoundVariable(target, with: replacement).internID,
+                argument: Term.child(argument).substitutingBoundVariable(target, with: replacement).internID
+            ))
+        case .pi(let hint, let type, let body):
+            return TermArena.shared.intern(TermKindStorage.pi(
+                hint: hint,
+                type: Term.child(type).substitutingBoundVariable(target, with: replacement).internID,
+                body: Term.child(body).substitutingBoundVariable(target + 1, with: replacement).internID
+            ))
+        case .abstraction(let hint, let type, let body):
+            return TermArena.shared.intern(TermKindStorage.abstraction(
+                hint: hint,
+                type: Term.child(type).substitutingBoundVariable(target, with: replacement).internID,
+                body: Term.child(body).substitutingBoundVariable(target + 1, with: replacement).internID
+            ))
+        case .inductive(let name, let type):
+            return TermArena.shared.intern(TermKindStorage.inductive(
+                name: name,
+                type: Term.child(type).substitutingBoundVariable(target, with: replacement).internID
+            ))
+        case .constructor(let name, let inductiveName, let type):
+            return TermArena.shared.intern(TermKindStorage.constructor(
+                name: name,
+                inductiveName: inductiveName,
+                type: Term.child(type).substitutingBoundVariable(target, with: replacement).internID
+            ))
+        case .match(let scrutinee, let motive, let cases):
+            return TermArena.shared.intern(TermKindStorage.match(
+                scrutinee: Term.child(scrutinee).substitutingBoundVariable(target, with: replacement).internID,
+                motive: Term.child(motive).substitutingBoundVariable(target, with: replacement).internID,
+                cases: Dictionary(uniqueKeysWithValues: cases.map {
+                    ($0.key, Term.child($0.value).substitutingBoundVariable(target, with: replacement).internID)
+                })
+            ))
+        }
+    }
+}
+
+// MARK: - Free variables and named (free-variable) substitution
 
 extension Term {
 
@@ -230,22 +479,25 @@ extension Term {
         }
     }
 
+    /// Substitutes a **free** variable `name` with `replacement` throughout `self`.
+    ///
+    /// Because bound variables are de Bruijn indices — a namespace entirely disjoint from
+    /// free-variable names — this never needs capture-avoidance: a binder's own bound
+    /// occurrences can never be confused with, or accidentally capture, a free variable
+    /// substitution, no matter what `replacement` contains or what any binder's display
+    /// `hint` happens to be. The pi/abstraction cases below are therefore a plain
+    /// structural recursion into `type` and the (already de Bruijn) `body` — the same shape
+    /// as every other compound case — with no freshening, no variable-name-set unions, and
+    /// no second walk to apply a rename. Combined with the ``freeVariables``-guarded
+    /// short-circuit, this is O(size actually touched), never O(size²).
     public func substituting(name: String, with replacement: Term) -> Term {
-        // O(1) short-circuit enabled by cached `freeVariables`: if `name` cannot occur in
-        // this subtree at all, substitution is a no-op — skip the walk entirely. This is
-        // what keeps substitution near-linear on deep ASTs instead of re-walking every
-        // level's full (unrelated) subterms.
         guard freeVariables.contains(name) else { return self }
 
         switch kind {
         case .variable(let variableName):
-            if variableName == name { return replacement }
-            return self
+            return variableName == name ? replacement : self
 
-        case .hole:
-            return self
-
-        case .universe:
+        case .boundVariable, .hole, .universe:
             return self
 
         case .application(let function, let argument):
@@ -254,18 +506,18 @@ extension Term {
                 argument: argument.substituting(name: name, with: replacement)
             )
 
-        case .pi(let param, let type, let body):
-            return substitutingUnderBinder(
-                param: param, type: type, body: body,
-                name: name, replacement: replacement,
-                build: { .pi(param: $0, type: $1, body: $2) }
+        case .pi(let hint, let type, let body):
+            return .rawPi(
+                hint: hint,
+                type: type.substituting(name: name, with: replacement),
+                body: body.substituting(name: name, with: replacement)
             )
 
-        case .abstraction(let param, let type, let body):
-            return substitutingUnderBinder(
-                param: param, type: type, body: body,
-                name: name, replacement: replacement,
-                build: { .abstraction(param: $0, type: $1, body: $2) }
+        case .abstraction(let hint, let type, let body):
+            return .rawAbstraction(
+                hint: hint,
+                type: type.substituting(name: name, with: replacement),
+                body: body.substituting(name: name, with: replacement)
             )
 
         case .inductive(let inductiveName, let type):
@@ -290,36 +542,10 @@ extension Term {
         }
     }
 
-    private func substitutingUnderBinder(
-        param: String,
-        type: Term,
-        body: Term,
-        name: String,
-        replacement: Term,
-        build: (String, Term, Term) -> Term
-    ) -> Term {
-        if param == name {
-            return build(param, type, body)
-        }
-        if !replacement.freeVariables.contains(param) {
-            return build(
-                param,
-                type.substituting(name: name, with: replacement),
-                body.substituting(name: name, with: replacement)
-            )
-        }
-        let fresh = Self.freshName(
-            avoiding: allVariableNames
-                .union(replacement.allVariableNames)
-                .union([name])
-        )
-        let freshenedType = type.substituting(name: param, with: .variable(fresh))
-        let freshenedBody = body.substituting(name: param, with: .variable(fresh))
-        return build(fresh, freshenedType, freshenedBody)
-            .substituting(name: name, with: replacement)
-    }
-
-    /// Generates a capture-avoiding binder name outside user syntax (`#0`, `#1`, …).
+    /// Generates a name outside user syntax (`#0`, `#1`, …). No longer needed for
+    /// capture-avoidance (bound variables are indices now — see ``substituting(name:with:)``),
+    /// but kept as a small general-purpose utility for callers that still want a
+    /// guaranteed-fresh display name.
     static func freshName(avoiding used: Set<String>) -> String {
         var index = 0
         while true {
@@ -340,28 +566,28 @@ extension Term {
             return try value.reduced(budget: &budget, unfolding: unfolding)
         }
         switch kind {
-        case .variable, .universe, .hole:
+        case .variable, .universe, .hole, .boundVariable:
             return self
 
-        case .pi(let param, let type, let body):
-            return .pi(
-                param: param,
+        case .pi(let hint, let type, let body):
+            return .rawPi(
+                hint: hint,
                 type: try type.reduced(budget: &budget, unfolding: unfolding),
                 body: try body.reduced(budget: &budget, unfolding: unfolding)
             )
 
-        case .abstraction(let param, let type, let body):
-            return .abstraction(
-                param: param,
+        case .abstraction(let hint, let type, let body):
+            return .rawAbstraction(
+                hint: hint,
                 type: try type.reduced(budget: &budget, unfolding: unfolding),
                 body: try body.reduced(budget: &budget, unfolding: unfolding)
             )
 
         case .application(let function, let argument):
             let reducedFunction = try function.reduced(budget: &budget, unfolding: unfolding)
-            if case .abstraction(let param, _, let body) = reducedFunction.kind {
+            if case .abstraction(_, _, let body) = reducedFunction.kind {
                 return try body
-                    .substituting(name: param, with: argument)
+                    .instantiated(with: argument)
                     .reduced(budget: &budget, unfolding: unfolding)
             }
             return .application(
@@ -434,106 +660,5 @@ extension Term {
             current = function
         }
         return (current, arguments.reversed())
-    }
-}
-
-// MARK: - Derived-fact computation (bottom-up, O(children) per node)
-
-extension Term {
-
-    static func computeFreeVariables(_ kind: Kind) -> Set<String> {
-        switch kind {
-        case .variable(let name):
-            return [name]
-        case .hole:
-            return []
-        case .universe:
-            return []
-        case .pi(let param, let type, let body),
-             .abstraction(let param, let type, let body):
-            return type.freeVariables
-                .union(body.freeVariables.subtracting([param]))
-        case .application(let function, let argument):
-            return function.freeVariables.union(argument.freeVariables)
-        case .inductive(_, let type):
-            return type.freeVariables
-        case .constructor(_, _, let type):
-            return type.freeVariables
-        case .match(let scrutinee, let motive, let cases):
-            return cases.values.reduce(
-                scrutinee.freeVariables.union(motive.freeVariables)
-            ) { partial, branch in
-                partial.union(branch.freeVariables)
-            }
-        }
-    }
-
-    static func computeFreeMetavariables(_ kind: Kind) -> Set<String> {
-        switch kind {
-        case .hole(let name):
-            return [name]
-        case .variable:
-            return []
-        case .universe:
-            return []
-        case .pi(let param, let type, let body),
-             .abstraction(let param, let type, let body):
-            return type.freeMetavariables
-                .union(body.freeMetavariables.subtracting([param]))
-        case .application(let function, let argument):
-            return function.freeMetavariables.union(argument.freeMetavariables)
-        case .inductive(_, let type):
-            return type.freeMetavariables
-        case .constructor(_, _, let type):
-            return type.freeMetavariables
-        case .match(let scrutinee, let motive, let cases):
-            return cases.values.reduce(
-                scrutinee.freeMetavariables.union(motive.freeMetavariables)
-            ) { partial, branch in
-                partial.union(branch.freeMetavariables)
-            }
-        }
-    }
-
-    static func computeAllVariableNames(_ kind: Kind) -> Set<String> {
-        switch kind {
-        case .variable(let name), .hole(let name):
-            return [name]
-        case .universe:
-            return []
-        case .pi(let param, let type, let body),
-             .abstraction(let param, let type, let body):
-            return type.allVariableNames.union(body.allVariableNames).union([param])
-        case .application(let function, let argument):
-            return function.allVariableNames.union(argument.allVariableNames)
-        case .inductive(_, let type):
-            return type.allVariableNames
-        case .constructor(_, _, let type):
-            return type.allVariableNames
-        case .match(let scrutinee, let motive, let cases):
-            return cases.values.reduce(
-                scrutinee.allVariableNames.union(motive.allVariableNames)
-            ) { partial, branch in
-                partial.union(branch.allVariableNames)
-            }
-        }
-    }
-
-    static func computeContainsMatch(_ kind: Kind) -> Bool {
-        switch kind {
-        case .variable, .hole, .universe:
-            return false
-        case .pi(_, let type, let body),
-             .abstraction(_, let type, let body):
-            return type.containsMatch || body.containsMatch
-        case .application(let function, let argument):
-            return function.containsMatch || argument.containsMatch
-        case .inductive(_, let type):
-            return type.containsMatch
-        case .constructor(_, _, let type):
-            return type.containsMatch
-        case .match:
-            return true
-        }
     }
 }

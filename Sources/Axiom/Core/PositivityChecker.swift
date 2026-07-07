@@ -82,7 +82,7 @@ public struct PositivityChecker {
         case .abstraction, .match:
             throw PositivityError.negativeOccurrence(inductive: inductiveName, in: type)
 
-        case .hole, .universe:
+        case .hole, .universe, .boundVariable:
             return
         }
     }
@@ -95,12 +95,17 @@ public struct PositivityChecker {
             return true
         }
         switch term.kind {
-        case .variable, .inductive, .constructor, .universe, .hole:
+        case .variable, .boundVariable, .inductive, .constructor, .universe, .hole:
             return false
         case .application(let function, let argument):
             return occurs(inductiveName, in: function) || occurs(inductiveName, in: argument)
         case .pi(_, let domain, let body),
              .abstraction(_, let domain, let body):
+            // Never opened: a bound variable can never itself be `inductiveName` (a
+            // literal string comparison against `.variable`), and this check doesn't
+            // correlate identity across positions, so walking the raw de Bruijn body is
+            // both correct and avoids any risk of a local binder's display hint
+            // coincidentally colliding with the inductive's own name.
             return occurs(inductiveName, in: domain) || occurs(inductiveName, in: body)
         case .match(let scrutinee, let motive, let cases):
             return occurs(inductiveName, in: scrutinee)
@@ -155,7 +160,7 @@ public struct PositivityChecker {
         switch term.kind {
         case .hole(let name):
             throw PositivityError.unresolvedHole(name, inductive: inductiveName, in: term)
-        case .variable, .universe:
+        case .variable, .boundVariable, .universe:
             return
         case .pi(_, let domain, let body),
              .abstraction(_, let domain, let body):

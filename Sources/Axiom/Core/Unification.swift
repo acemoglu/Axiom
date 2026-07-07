@@ -74,28 +74,17 @@ public struct Unifier {
             try unifyNormalized(a1, a2, conversion: conversion, unfolding: unfolding, context: &context)
             return
 
-        case (.pi(let p1, let ty1, let b1), .pi(let p2, let ty2, let b2)):
+        case (.pi(_, let ty1, let b1), .pi(_, let ty2, let b2)):
+            // `b1`/`b2` are de Bruijn-indexed (index 0 = this binder's own variable), so
+            // they already refer to "the same" position regardless of each side's surface
+            // hint — no freshening/renaming needed to align them before recursing.
             try unifyNormalized(ty1, ty2, conversion: conversion, unfolding: unfolding, context: &context)
-            let fresh = Term.freshName(
-                avoiding: b1.allVariableNames
-                    .union(b2.allVariableNames)
-                    .union(Set(context.keys))
-            )
-            let freshened1 = b1.substituting(name: p1, with: .variable(fresh))
-            let freshened2 = b2.substituting(name: p2, with: .variable(fresh))
-            try unifyNormalized(freshened1, freshened2, conversion: conversion, unfolding: unfolding, context: &context)
+            try unifyNormalized(b1, b2, conversion: conversion, unfolding: unfolding, context: &context)
             return
 
-        case (.abstraction(let p1, let ty1, let b1), .abstraction(let p2, let ty2, let b2)):
+        case (.abstraction(_, let ty1, let b1), .abstraction(_, let ty2, let b2)):
             try unifyNormalized(ty1, ty2, conversion: conversion, unfolding: unfolding, context: &context)
-            let fresh = Term.freshName(
-                avoiding: b1.allVariableNames
-                    .union(b2.allVariableNames)
-                    .union(Set(context.keys))
-            )
-            let freshened1 = b1.substituting(name: p1, with: .variable(fresh))
-            let freshened2 = b2.substituting(name: p2, with: .variable(fresh))
-            try unifyNormalized(freshened1, freshened2, conversion: conversion, unfolding: unfolding, context: &context)
+            try unifyNormalized(b1, b2, conversion: conversion, unfolding: unfolding, context: &context)
             return
 
         case (.inductive(let n1, let s1), .inductive(let n2, let s2)):
@@ -173,19 +162,19 @@ public struct Unifier {
             defer { visited.remove(meta) }
             return applyMetas(solution, context: context, visited: &visited)
 
-        case .variable, .universe:
+        case .variable, .boundVariable, .universe:
             return term
 
-        case .pi(let param, let type, let body):
-            return .pi(
-                param: param,
+        case .pi(let hint, let type, let body):
+            return .rawPi(
+                hint: hint,
                 type: applyMetas(type, context: context, visited: &visited),
                 body: applyMetas(body, context: context, visited: &visited)
             )
 
-        case .abstraction(let param, let type, let body):
-            return .abstraction(
-                param: param,
+        case .abstraction(let hint, let type, let body):
+            return .rawAbstraction(
+                hint: hint,
                 type: applyMetas(type, context: context, visited: &visited),
                 body: applyMetas(body, context: context, visited: &visited)
             )

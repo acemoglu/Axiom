@@ -11,10 +11,14 @@ enum InductiveFamily {
         return (current, arguments.reversed())
     }
 
+    /// Peels every Π, opening each binder with its own stored hint as we descend so that a
+    /// dependent index in the final codomain (e.g. `Vec A n` referencing an earlier `n`)
+    /// comes back as `.variable("n")` — consistent with every other traversal (e.g.
+    /// `TypeChecker.peelPiParams`) that opens the very same `Term` the same way.
     static func codomain(of type: Term) -> Term {
         var current = type
-        while case .pi(_, _, let body) = current.kind {
-            current = body
+        while case .pi(let hint, _, let rawBody) = current.kind {
+            current = rawBody.instantiated(with: .variable(hint))
         }
         return current
     }

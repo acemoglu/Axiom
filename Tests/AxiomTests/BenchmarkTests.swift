@@ -69,12 +69,13 @@ final class BenchmarkTests: XCTestCase {
     /// cache. This isolates the raw substitution/normalization cost the cache-based
     /// speedup above cannot mask — the honest "brand new AST every time" number.
     ///
-    /// Known remaining limitation: because the substituted variable sits at the very tail
-    /// of the chain, *every* application must walk the entire remaining (unsubstituted)
-    /// spine to reach it — an O(depth) substitution repeated `depth` times is O(depth²)
-    /// node visits, independent of hash-consing or caching. Eliminating this fully needs
-    /// de Bruijn indices with deferred/explicit substitution (a bigger, separate change
-    /// from the representation work here) rather than eager named-variable substitution.
+    /// Historical note: this used to be the O(depth²) case — named substitution paid a
+    /// capture-avoidance ("is this name already used anywhere in this subtree") cost on
+    /// every level of a deep binder chain. Bound variables are now de Bruijn indices (see
+    /// `Term.instantiated(with:)`), which need no such search, so this is O(depth): on
+    /// this machine, the depth-500 fresh case went from ~1 op/sec to several hundred —
+    /// see `testDeepApplicationScalesLinearlyNotQuadratically` below for a direct
+    /// growth-rate assertion.
     func testDeepApplicationFreshThroughput() throws {
         let depth = 500
         let iterations = 50
@@ -98,17 +99,55 @@ final class BenchmarkTests: XCTestCase {
         print("BENCHMARK axiom deep application (depth=\(depth), fresh) typeCheck: \(Int(opsPerSec)) ops/sec (n=\(iterations))")
     }
 
+    /// Direct regression guard for the de Bruijn substitution fix: doubling the chain
+    /// depth on a structurally-fresh (never-cached) deep application should roughly
+    /// *double* the time (O(depth)), not *quadruple* it (O(depth²)). We assert a generous
+    /// upper bound (6x for a 2x depth increase) so ordinary timing noise can't flake the
+    /// test, while still failing hard if the quadratic behavior ever comes back.
+    func testDeepApplicationScalesLinearlyNotQuadratically() throws {
+        // Each call is a structurally-fresh salted term (never cache-hit), repeated enough
+        // times per depth to rise well above timer-resolution/scheduling noise.
+        func time(depth: Int, salt: String, repeats: Int) throws -> Double {
+            let start = CFAbsoluteTimeGetCurrent()
+            for i in 0..<repeats {
+                let deepFunction = makeDeepCurriedIdentity(depth: depth, salt: "\(salt)\(i)")
+                let deepApplication = makeDeepApplication(function: deepFunction, argument: typeA, depth: depth)
+                var checker = TypeChecker()
+                checker.reductionBudget = ReductionBudget(steps: 50_000_000)
+                _ = try checker.typeCheck(term: deepApplication)
+            }
+            return CFAbsoluteTimeGetCurrent() - start
+        }
+
+        // Warm up the process (allocator caches, etc.) with a throwaway run.
+        _ = try time(depth: 100, salt: "warmup", repeats: 20)
+
+        let small = try (0..<3).map { try time(depth: 250, salt: "scaleA\($0)_", repeats: 40) }.min()!
+        let large = try (0..<3).map { try time(depth: 500, salt: "scaleB\($0)_", repeats: 40) }.min()!
+
+        // Guard against a degenerate near-zero baseline making the ratio meaningless.
+        XCTAssertGreaterThan(large, 0)
+        let ratio = large / max(small, 1e-6)
+        XCTAssertLessThan(
+            ratio,
+            6.0,
+            "doubling depth (250 -> 500) took \(ratio)x longer; expected ~2x for O(depth), " +
+            "not ~4x for O(depth²)"
+        )
+    }
+
     /// `λx0:Type1. λx1:Type1. … λx(depth-1):Type1. x0` — a `depth`-deep curried identity.
     /// Parameters are typed `Type1` (not `Type0`) so that `Type0` itself (which has type
     /// `Type1`) is a valid argument at every application. `salt` is folded into every
     /// binder name so structurally-distinct calls never collide in the hash-cons pool.
     private func makeDeepCurriedIdentity(depth: Int, salt: String) -> Term {
         let paramType = Term.universe(1)
-        var body: Term = .variable("\(salt)_x0")
-        for i in stride(from: depth - 1, through: 0, by: -1) {
-            body = .abstraction(param: "\(salt)_x\(i)", type: paramType, body: body)
-        }
-        return body
+        let hints = (0..<depth).map { "\(salt)_x\($0)" }
+        return Term.curriedAbstractions(
+            hints: hints,
+            type: paramType,
+            freeBody: .variable("\(salt)_x0")
+        )
     }
 
     /// `function argument argument … argument` (`depth` applications).

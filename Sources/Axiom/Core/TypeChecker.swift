@@ -63,9 +63,19 @@ public struct TypeChecker {
     public let conversion: Conversion
     public var reductionBudget = ReductionBudget()
 
+    /// Per-checker memo of WHNF results — keyed by ``Term/internID``. Cleared implicitly
+    /// when the checker is dropped; avoids re-normalizing the same type (e.g. `Type₁`
+    /// domains) hundreds of times along a deep application spine.
+    private var normalizationCache: [Int32: Term] = [:]
+
+    /// Full normal form for conversion checks — WHNF alone is not always enough to make
+    /// definitionally-equal types syntactically identical (δ-unfolding, deep β-chains).
+    private let comparisonConversion = Conversion(strategy: .normalForm)
+    private var comparisonNormalizationCache: [Int32: Term] = [:]
+
     public init(
         declarations: DeclarationEnvironment = DeclarationEnvironment(),
-        conversion: Conversion = Conversion()
+        conversion: Conversion = Conversion(strategy: .weakHeadNormalForm)
     ) {
         self.declarations = declarations
         self.conversion = conversion
@@ -119,6 +129,12 @@ public struct TypeChecker {
             }
             throw TypeError.unboundVariable(name)
 
+        case .boundVariable:
+            // Every binder we descend into is opened (see the `.pi`/`.abstraction` cases
+            // below) before its body is ever handed to `typeCheck` again, so a properly
+            // built term never reaches here with a "loose" bound variable.
+            throw TypeError.unboundVariable("<bound>")
+
         case .hole(let name):
             if let solution = metavariables[name] {
                 return instantiateHoles(in: solution)
@@ -128,7 +144,8 @@ public struct TypeChecker {
         case .universe(let level):
             return .universe(level + 1)
 
-        case .pi(let param, let domain, let codomain):
+        case .pi(let param, let domain, let rawCodomain):
+            let codomain = rawCodomain.instantiated(with: .variable(param))
             let domainType = try typeCheck(term: domain, environment: environment)
             let i = try expectUniverseLevel(of: domain, inferredType: domainType)
             var extended = environment
@@ -137,7 +154,11 @@ public struct TypeChecker {
             let j = try expectUniverseLevel(of: codomain, inferredType: codomainType)
             return .universe(max(i, j))
 
-        case .abstraction(let param, let paramType, let body):
+        case .abstraction(let param, let paramType, let rawBody):
+            if expectedType == nil {
+                return try typeCheckAbstractionSpine(term: term, environment: environment)
+            }
+            let body = rawBody.instantiated(with: .variable(param))
             let resolvedParamType = resolvePatternType(paramType, name: param, environment: environment)
             var extended = environment
             extended[param] = resolvedParamType
@@ -155,18 +176,7 @@ public struct TypeChecker {
             if function.role == .declaration || argument.role == .declaration {
                 throw TypeError.declarationUsedAsExpression(term)
             }
-            let functionType = try typeCheck(term: function, environment: environment)
-            let reducedFunctionType = try normalizeForChecking(functionType)
-            guard case .pi(let param, let domain, let codomain) = reducedFunctionType.kind else {
-                throw TypeError.notAFunction(function, functionType)
-            }
-            let argumentType = try typeCheck(term: argument, environment: environment)
-            try ensureConvertibleOrInfer(expected: domain, actual: argumentType)
-            return instantiateHoles(
-                in: try normalizeForChecking(
-                    codomain.substituting(name: param, with: argument)
-                )
-            )
+            return try typeCheckApplicationSpine(term: term, environment: environment)
 
         case .match(let scrutinee, let motive, let cases):
             let scrutineeType = try typeCheck(
@@ -185,9 +195,10 @@ public struct TypeChecker {
             let normalizedScrutineeType = try normalizeForChecking(scrutineeType)
             let motiveType = try typeCheck(term: motive, environment: environment)
             let normalizedMotiveType = try normalizeForChecking(motiveType)
-            guard case .pi(let motiveParam, let motiveDomain, let motiveCodomain) = normalizedMotiveType.kind else {
+            guard case .pi(let motiveParam, let motiveDomain, let rawMotiveCodomain) = normalizedMotiveType.kind else {
                 throw TypeError.motiveMismatch(expected: normalizedScrutineeType, actual: motiveType)
             }
+            let motiveCodomain = rawMotiveCodomain.instantiated(with: .variable(motiveParam))
             try ensureConvertible(expected: motiveDomain, actual: normalizedScrutineeType)
             var motiveEnvironment = environment
             motiveEnvironment[motiveParam] = motiveDomain
@@ -243,7 +254,6 @@ public struct TypeChecker {
                     scrutinee: scrutinee,
                     scrutineeIndices: scrutineeIndices,
                     motive: motive,
-                    motiveParam: motiveParam,
                     environment: environment
                 )
                 if peelPiParams(from: constructor.type).isEmpty {
@@ -381,19 +391,19 @@ public struct TypeChecker {
             defer { visited.remove(name) }
             return instantiateHoles(in: solution, visited: &visited)
 
-        case .variable, .universe:
+        case .variable, .boundVariable, .universe:
             return term
 
-        case .pi(let param, let type, let body):
-            return .pi(
-                param: param,
+        case .pi(let hint, let type, let body):
+            return .rawPi(
+                hint: hint,
                 type: instantiateHoles(in: type, visited: &visited),
                 body: instantiateHoles(in: body, visited: &visited)
             )
 
-        case .abstraction(let param, let type, let body):
-            return .abstraction(
-                param: param,
+        case .abstraction(let hint, let type, let body):
+            return .rawAbstraction(
+                hint: hint,
                 type: instantiateHoles(in: type, visited: &visited),
                 body: instantiateHoles(in: body, visited: &visited)
             )
@@ -423,15 +433,147 @@ public struct TypeChecker {
         }
     }
 
+    /// Type-checks `λx₀. λx₁. … body` in one pass: peel the binder spine, open every de
+    /// Bruijn index to its surface `hint` at once, check `body` once, then re-wrap Π types.
+    private mutating func typeCheckAbstractionSpine(
+        term: Term,
+        environment: [String: Term]
+    ) throws -> Term {
+        var params: [(hint: String, type: Term)] = []
+        var extended = environment
+        var rawBody = term
+
+        while case .abstraction(let hint, let paramType, let body) = rawBody.kind {
+            let resolvedType = resolvePatternType(paramType, name: hint, environment: extended)
+            params.append((hint, resolvedType))
+            extended[hint] = resolvedType
+            rawBody = body
+        }
+
+        let openedBody = openDeBruijn(rawBody, binderCount: params.count, hints: params.map(\.hint))
+        var resultType = try typeCheck(term: openedBody, environment: extended, expectedType: nil)
+        for param in params.reversed() {
+            resultType = .pi(param: param.hint, type: param.type, body: resultType)
+        }
+        return resultType
+    }
+
+    /// Maps de Bruijn indices introduced by a peeled abstraction spine to named variables.
+    private func openDeBruijn(_ term: Term, binderCount: Int, hints: [String], offset: Int = 0) -> Term {
+        switch term.kind {
+        case .boundVariable(let index):
+            let relative = index - offset
+            guard relative >= 0, relative < binderCount else { return term }
+            return .variable(hints[binderCount - 1 - relative])
+        case .variable, .hole, .universe:
+            return term
+        case .application(let function, let argument):
+            return .application(
+                function: openDeBruijn(function, binderCount: binderCount, hints: hints, offset: offset),
+                argument: openDeBruijn(argument, binderCount: binderCount, hints: hints, offset: offset)
+            )
+        case .pi(let hint, let type, let body):
+            return .rawPi(
+                hint: hint,
+                type: openDeBruijn(type, binderCount: binderCount, hints: hints, offset: offset),
+                body: openDeBruijn(body, binderCount: binderCount, hints: hints, offset: offset + 1)
+            )
+        case .abstraction(let hint, let type, let body):
+            return .rawAbstraction(
+                hint: hint,
+                type: openDeBruijn(type, binderCount: binderCount, hints: hints, offset: offset),
+                body: openDeBruijn(body, binderCount: binderCount, hints: hints, offset: offset + 1)
+            )
+        case .inductive(let name, let type):
+            return .inductive(
+                name: name,
+                type: openDeBruijn(type, binderCount: binderCount, hints: hints, offset: offset)
+            )
+        case .constructor(let name, let inductiveName, let type):
+            return .constructor(
+                name: name,
+                inductiveName: inductiveName,
+                type: openDeBruijn(type, binderCount: binderCount, hints: hints, offset: offset)
+            )
+        case .match(let scrutinee, let motive, let cases):
+            return .match(
+                scrutinee: openDeBruijn(scrutinee, binderCount: binderCount, hints: hints, offset: offset),
+                motive: openDeBruijn(motive, binderCount: binderCount, hints: hints, offset: offset),
+                cases: cases.mapValues {
+                    openDeBruijn($0, binderCount: binderCount, hints: hints, offset: offset)
+                }
+            )
+        }
+    }
+
+    /// Type-checks a left-associated application spine `(((f a₀) a₁) … aₙ)` in O(n)
+    /// applications without re-entering `typeCheck` on each intermediate `f aᵢ` node.
+    /// The recursive formulation re-dispatched inference on every prefix; this peels the
+    /// spine once, checks `f` once, then iteratively applies Π-elimination.
+    private mutating func typeCheckApplicationSpine(
+        term: Term,
+        environment: [String: Term]
+    ) throws -> Term {
+        var arguments: [Term] = []
+        var function = term
+        while case .application(let fn, let arg) = function.kind {
+            arguments.append(arg)
+            function = fn
+        }
+        arguments.reverse()
+
+        var functionType = try typeCheck(term: function, environment: environment, expectedType: nil)
+        for argument in arguments {
+            functionType = try applyFunctionType(
+                functionType,
+                argument: argument,
+                environment: environment,
+                blame: term
+            )
+        }
+        return functionType
+    }
+
+    /// Π-elimination step: given `Γ ⊢ f : Π(x:A).B` and argument `a`, returns `B[x:=a]`.
+    private mutating func applyFunctionType(
+        _ functionType: Term,
+        argument: Term,
+        environment: [String: Term],
+        blame: Term
+    ) throws -> Term {
+        let reducedFunctionType = try piHeadIfNeeded(functionType)
+        guard case .pi(_, let domain, let rawCodomain) = reducedFunctionType.kind else {
+            throw TypeError.notAFunction(blame, functionType)
+        }
+        let argumentType = try typeCheck(term: argument, environment: environment, expectedType: nil)
+        try ensureConvertibleOrInfer(expected: domain, actual: argumentType)
+        // Non-dependent Π: when the codomain mentions no bound variables, the parameter
+        // being applied is unused in the return type — peel the outer Π by taking `body`
+        // directly instead of walking the full instantiate spine (O(1) vs O(depth)).
+        let resultType: Term
+        if TermArena.shared.hasBoundVariables(for: rawCodomain.internID) {
+            resultType = rawCodomain.instantiated(with: argument)
+        } else {
+            resultType = rawCodomain
+        }
+        return instantiateHoles(in: resultType)
+    }
+
+    /// Returns `term` when it is already headed by Π; otherwise weak-head-normalizes once.
+    private mutating func piHeadIfNeeded(_ term: Term) throws -> Term {
+        if case .pi = term.kind { return term }
+        return try normalizeForChecking(term)
+    }
+
     /// Definitional equality only — no metavariable solving (trusted checking).
     private mutating func ensureConvertible(expected: Term, actual: Term) throws {
+        if expected == actual { return }
         let normalizedExpected = try normalizedForComparison(expected)
         let normalizedActual = try normalizedForComparison(actual)
-        guard try conversion.areDefinitionallyEqual(
+        if normalizedExpected == normalizedActual { return }
+        guard conversion.areDefinitionallyEqualAssumingNormalized(
             normalizedExpected,
-            normalizedActual,
-            budget: &reductionBudget,
-            unfolding: conversionUnfolding()
+            normalizedActual
         ) else {
             throw TypeError.typeMismatch(expected: expected, actual: actual)
         }
@@ -439,13 +581,13 @@ public struct TypeChecker {
 
     /// Conversion first; on failure, solve metavariables via unification (type inference).
     private mutating func ensureConvertibleOrInfer(expected: Term, actual: Term) throws {
+        if expected == actual { return }
         let normalizedExpected = try normalizedForComparison(expected)
         let normalizedActual = try normalizedForComparison(actual)
-        if try conversion.areDefinitionallyEqual(
+        if normalizedExpected == normalizedActual { return }
+        if conversion.areDefinitionallyEqualAssumingNormalized(
             normalizedExpected,
-            normalizedActual,
-            budget: &reductionBudget,
-            unfolding: conversionUnfolding()
+            normalizedActual
         ) {
             return
         }
@@ -453,6 +595,7 @@ public struct TypeChecker {
             try Unifier.unify(
                 normalizedExpected,
                 normalizedActual,
+                conversion: conversion,
                 unfolding: conversionUnfolding(),
                 context: &metavariables
             )
@@ -462,19 +605,39 @@ public struct TypeChecker {
     }
 
     private mutating func normalizeForChecking(_ term: Term) throws -> Term {
+        let withHoles = instantiateHoles(in: term)
+        if let cached = normalizationCache[withHoles.internID] {
+            return cached
+        }
         do {
-            return try conversion.normalize(
-                instantiateHoles(in: term),
+            let result = try conversion.normalize(
+                withHoles,
                 budget: &reductionBudget,
                 unfolding: conversionUnfolding()
             )
+            normalizationCache[withHoles.internID] = result
+            return result
         } catch ReductionError.outOfFuel {
             throw TypeError.reductionOutOfBounds(term)
         }
     }
 
     private mutating func normalizedForComparison(_ term: Term) throws -> Term {
-        try normalizeForChecking(term)
+        let withHoles = instantiateHoles(in: term)
+        if let cached = comparisonNormalizationCache[withHoles.internID] {
+            return cached
+        }
+        do {
+            let result = try comparisonConversion.normalize(
+                withHoles,
+                budget: &reductionBudget,
+                unfolding: conversionUnfolding()
+            )
+            comparisonNormalizationCache[withHoles.internID] = result
+            return result
+        } catch ReductionError.outOfFuel {
+            throw TypeError.reductionOutOfBounds(term)
+        }
     }
 
     private func expectUniverseLevel(of term: Term, inferredType: Term) throws -> Int {
@@ -697,7 +860,7 @@ public struct TypeChecker {
         switch term.kind {
         case .hole(let name):
             return [name]
-        case .variable, .universe:
+        case .variable, .boundVariable, .universe:
             return []
         case .application(let function, let argument):
             return unresolvedTermHoles(in: function).union(unresolvedTermHoles(in: argument))
@@ -806,21 +969,28 @@ public struct TypeChecker {
         paramType: Term
     ) throws -> Term? {
         let normalized = try normalizeForChecking(expected)
-        guard case .pi(_, let domain, let body) = normalized.kind else { return nil }
+        guard case .pi(_, let domain, let rawBody) = normalized.kind else { return nil }
         do {
             try ensureConvertibleOrInfer(expected: domain, actual: paramType)
         } catch {
             return nil
         }
-        return body
+        // Open with the abstraction-under-check's own `param`: this expected type is only
+        // ever compared against a body already opened with that same name (see the
+        // `.abstraction` case above), so using it here keeps both sides referring to the
+        // same free variable.
+        return rawBody.instantiated(with: .variable(param))
     }
 
+    /// Peels a Π-chain, opening each binder with its own stored hint as we go so that a
+    /// later (dependent) domain's reference to an earlier parameter comes back as
+    /// `.variable(thatParameter)` rather than a raw bound index.
     private func peelPiParams(from type: Term) -> [(String, Term)] {
         var params: [(String, Term)] = []
         var current = type
-        while case .pi(let param, let domain, let body) = current.kind {
+        while case .pi(let param, let domain, let rawBody) = current.kind {
             params.append((param, domain))
-            current = body
+            current = rawBody.instantiated(with: .variable(param))
         }
         return params
     }
@@ -828,9 +998,9 @@ public struct TypeChecker {
     private func lambdaArity(of term: Term) -> Int {
         var count = 0
         var current = term
-        while case .abstraction(_, _, let body) = current.kind {
+        while case .abstraction(let hint, _, let rawBody) = current.kind {
             count += 1
-            current = body
+            current = rawBody.instantiated(with: .variable(hint))
         }
         return count
     }
@@ -851,32 +1021,20 @@ public struct TypeChecker {
         return term
     }
 
-    /// Applies motive *C* to constructor instance *c x₁ … xₙ*, α-renaming when needed.
-    private func applyMotive(
-        _ motive: Term,
-        motiveParam: String,
-        to instance: Term,
-        constructorParameters: [(String, Term)]
-    ) -> Term {
-        let constructorParamNames = Set(constructorParameters.map(\.0))
-        var workingMotive = motive
-
-        if constructorParamNames.contains(motiveParam),
-           case .abstraction(let param, let paramType, let body) = motive.kind,
-           param == motiveParam {
-            let fresh = Term.freshName(
-                avoiding: constructorParamNames
-                    .union(instance.freeVariables)
-                    .union(motive.freeVariables)
-            )
-            workingMotive = .abstraction(
-                param: fresh,
-                type: paramType,
-                body: body.substituting(name: param, with: .variable(fresh))
-            )
+    /// Applies motive *C* to constructor instance *c x₁ … xₙ*: *C (c x₁ … xₙ)*.
+    ///
+    /// Because the motive's own bound variable is a de Bruijn index — not the name
+    /// `motiveParam` — it can never collide with (or need renaming away from) a
+    /// constructor/branch parameter name, however they happen to be spelled. Instantiating
+    /// the motive's raw body with `instance` directly both replaces the old two-step
+    /// "α-rename away from a collision, then substitute by name" dance with a single
+    /// direct substitution, and sidesteps the exact class of capture bug that dance
+    /// defended against.
+    private func applyMotive(_ motive: Term, to instance: Term) -> Term {
+        if case .abstraction(_, _, let rawBody) = motive.kind {
+            return rawBody.instantiated(with: instance)
         }
-
-        return Term.application(function: workingMotive, argument: instance)
+        return Term.application(function: motive, argument: instance)
     }
 
     private mutating func expectedMatchBranchType(
@@ -887,7 +1045,6 @@ public struct TypeChecker {
         scrutinee: Term,
         scrutineeIndices: [Term],
         motive: Term,
-        motiveParam: String,
         environment: [String: Term]
     ) throws -> (Term, [String: Term]) {
         let parameters = peelPiParams(from: constructorType)
@@ -921,12 +1078,7 @@ public struct TypeChecker {
             inductiveName: inductiveName,
             parameters: argumentInstantiation.parameters
         )
-        let motiveInstance = applyMotive(
-            motive,
-            motiveParam: motiveParam,
-            to: instance,
-            constructorParameters: argumentInstantiation.parameters
-        )
+        let motiveInstance = applyMotive(motive, to: instance)
         let normalizedMotiveInstance = try normalizeForChecking(motiveInstance)
         let branchBodyType = try motiveBranchTargetType(
             normalizedMotiveInstance,
@@ -1039,9 +1191,9 @@ public struct TypeChecker {
     private func peelLambdaParams(from term: Term, expectedArity: Int) -> [(String, Term)] {
         var params: [(String, Term)] = []
         var current = term
-        while params.count < expectedArity, case .abstraction(let name, let type, let body) = current.kind {
+        while params.count < expectedArity, case .abstraction(let name, let type, let rawBody) = current.kind {
             params.append((name, type))
-            current = body
+            current = rawBody.instantiated(with: .variable(name))
         }
         return params
     }

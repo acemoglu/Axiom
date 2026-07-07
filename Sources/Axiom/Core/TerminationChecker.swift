@@ -138,6 +138,9 @@ public struct TerminationChecker {
             collectCalleeNames(in: function, among: names, into: &callees)
             collectCalleeNames(in: argument, among: names, into: &callees)
         case .abstraction(_, _, let body):
+            // `names` are global (mutually-recursive) declaration names, never local bound
+            // parameters, so a call site is always `.variable(globalName)` regardless of
+            // whether enclosing binders are opened — walking the raw de Bruijn body is safe.
             collectCalleeNames(in: body, among: names, into: &callees)
         case .match(let scrutinee, let motive, let cases):
             collectCalleeNames(in: scrutinee, among: names, into: &callees)
@@ -150,7 +153,7 @@ public struct TerminationChecker {
             collectCalleeNames(in: body, among: names, into: &callees)
         case .inductive(_, let type), .constructor(_, _, let type):
             collectCalleeNames(in: type, among: names, into: &callees)
-        case .hole, .universe, .variable:
+        case .hole, .universe, .variable, .boundVariable:
             break
         }
     }
@@ -216,22 +219,28 @@ public struct TerminationChecker {
         return [node]
     }
 
+    /// Opens each abstraction with its own hint as we peel: downstream structural-descent
+    /// checks compare `.variable(name)` occurrences inside `body` against these exact
+    /// `parameters`, so the body must have those parameters free-by-name, not as raw bound
+    /// indices.
     private func peelAbstractions(_ term: Term) -> (parameters: [String], body: Term) {
         var parameters: [String] = []
         var current = term
-        while case .abstraction(let param, _, let body) = current.kind {
+        while case .abstraction(let param, _, let rawBody) = current.kind {
             parameters.append(param)
-            current = body
+            current = rawBody.instantiated(with: .variable(param))
         }
         return (parameters, current)
     }
 
+    /// See ``peelAbstractions(_:)``: the collected `binders` are later matched by name
+    /// against occurrences inside this same (opened) body, via ``collectCallSites``.
     private func branchPatternBinders(_ branch: Term) -> Set<String> {
         var binders: Set<String> = []
         var current = branch
-        while case .abstraction(let param, _, let body) = current.kind {
+        while case .abstraction(let param, _, let rawBody) = current.kind {
             binders.insert(param)
-            current = body
+            current = rawBody.instantiated(with: .variable(param))
         }
         return binders
     }
@@ -251,7 +260,7 @@ public struct TerminationChecker {
             return containsCall(to: targets, in: domain) || containsCall(to: targets, in: body)
         case .inductive(_, let type), .constructor(_, _, let type):
             return containsCall(to: targets, in: type)
-        case .hole, .universe:
+        case .hole, .universe, .boundVariable:
             return false
         }
     }
@@ -276,7 +285,7 @@ public struct TerminationChecker {
                 || containsBareRecursiveReference(in: body, targets: targets)
         case .inductive(_, let type), .constructor(_, _, let type):
             return containsBareRecursiveReference(in: type, targets: targets)
-        case .hole, .universe:
+        case .hole, .universe, .boundVariable:
             return false
         }
     }
@@ -313,19 +322,25 @@ public struct TerminationChecker {
         case .application(let function, let argument):
             collectCallSites(function, targets: targets, into: &sites)
             collectCallSites(argument, targets: targets, into: &sites)
-        case .pi(_, let domain, let body):
+        case .pi(let hint, let domain, let rawBody):
             collectCallSites(domain, targets: targets, into: &sites)
-            collectCallSites(body, targets: targets, into: &sites)
-        case .abstraction(_, let paramType, let body):
+            collectCallSites(rawBody.instantiated(with: .variable(hint)), targets: targets, into: &sites)
+        case .abstraction(let hint, let paramType, let rawBody):
+            // Unlike `containsCall`/`containsBareRecursiveReference` (which only match
+            // *global* names), the call-argument terms collected here are later tested by
+            // `isStrictStructuralDescent` against *local* pattern binders — so nested
+            // references to an enclosing parameter must come back as `.variable(hint)`,
+            // not a raw bound index, or a legitimate structural-descent call would be
+            // rejected as non-terminating.
             collectCallSites(paramType, targets: targets, into: &sites)
-            collectCallSites(body, targets: targets, into: &sites)
+            collectCallSites(rawBody.instantiated(with: .variable(hint)), targets: targets, into: &sites)
         case .match(let scrutinee, let motive, let cases):
             collectCallSites(scrutinee, targets: targets, into: &sites)
             collectCallSites(motive, targets: targets, into: &sites)
             for branch in cases.values {
                 collectCallSites(branch, targets: targets, into: &sites)
             }
-        case .hole, .universe, .variable, .inductive, .constructor:
+        case .hole, .universe, .variable, .boundVariable, .inductive, .constructor:
             break
         }
     }

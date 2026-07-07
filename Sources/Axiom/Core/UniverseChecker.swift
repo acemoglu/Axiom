@@ -124,7 +124,7 @@ public struct UniverseChecker {
                 )
             }
 
-        case .variable, .universe, .hole:
+        case .variable, .boundVariable, .universe, .hole:
             return
         }
     }
