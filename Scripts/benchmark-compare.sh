@@ -27,6 +27,7 @@ echo ""
 if command -v lean >/dev/null 2>&1; then
   echo "Lean: $(lean --version | head -1)"
   lean --run "$ROOT/Scripts/lean-bench/Main.lean" "$N" all
+  lean --run "$ROOT/Scripts/lean-bench/DeepApp.lean" 500 200
 
   echo ""
   if [[ "${SKIP_SUBPROCESS:-0}" == "1" ]]; then

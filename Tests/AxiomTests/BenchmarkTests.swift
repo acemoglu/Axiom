@@ -99,6 +99,29 @@ final class BenchmarkTests: XCTestCase {
         print("BENCHMARK axiom deep application (depth=\(depth), fresh) typeCheck: \(Int(opsPerSec)) ops/sec (n=\(iterations))")
     }
 
+    /// Shared-spine rebuild without global cache: make the term non-cacheable by using a
+    /// free local variable argument (`a : Type₀`) so `isGloballyCacheable == false`.
+    func testDeepApplicationSharedCacheOffThroughput() throws {
+        let depth = 500
+        let iterations = 200
+        let deepFunction = makeDeepCurriedIdentity(depth: depth, salt: "shared-cacheoff")
+        let deepApplication = makeDeepApplication(function: deepFunction, argument: .variable("a"), depth: depth)
+        let environment = ["a": Term.universe(1)]
+
+        func check() throws {
+            _ = try TypeChecker.typeCheck(term: deepApplication, environment: environment)
+        }
+
+        for _ in 0..<5 { try check() }
+
+        let start = CFAbsoluteTimeGetCurrent()
+        for _ in 0..<iterations {
+            try check()
+        }
+        let opsPerSec = Double(iterations) / (CFAbsoluteTimeGetCurrent() - start)
+        print("BENCHMARK axiom deep application (depth=\(depth), shared-spine-rebuild-uncached) typeCheck: \(Int(opsPerSec)) ops/sec (n=\(iterations))")
+    }
+
     /// Direct regression guard for the de Bruijn substitution fix: doubling the chain
     /// depth on a structurally-fresh (never-cached) deep application should roughly
     /// *double* the time (O(depth)), not *quadruple* it (O(depth²)). We assert a generous
