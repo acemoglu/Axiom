@@ -38,17 +38,17 @@ The argument is **where** verification lives: inside the software you already sh
 * Fuel-bounded normalization (`TypeError.reductionOutOfBounds` when you run out)
 * **Road to v1.0 soundness:** tighten declaration admission with an inconsistency guard so non-axiom declarations cannot encode contradiction paths
 
-## Requirements
-
-Swift 5.10+. Pure Swift on macOS, iOS, watchOS, tvOS, and Linux.
-
 ## Installation
+
+Add the package in Xcode (**File → Add Package Dependencies…**) or in `Package.swift`:
 
 ```swift
 dependencies: [
   .package(url: "https://github.com/acemoglu/Axiom.git", from: "1.0.0")
 ]
 ```
+
+Requires Swift 5.10+ (Xcode 15.3 or later).
 
 ## Quick Start
 
