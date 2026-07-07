@@ -42,23 +42,14 @@
 /// This "locally nameless" design is what makes hash-consing double as an **alpha-
 /// equivalence** cache: two binders that differ only in their bound-variable's surface name
 /// abstract to the *exact same* de Bruijn body, so they intern to the *same* `Term`
-/// instance. `Term.==`/`alphaEquivalent` are therefore always intern-id comparison — never
-/// a deep structural fallback (see ``TermPool``'s `InternKey`, which deliberately omits
-/// `hint` from the pi/abstraction hash and equality).
+/// instance. `Term.==` is intern-id comparison (see ``TermPool``'s `InternKey`, which omits
+/// `hint` from pi/abstraction keys).
 ///
-/// It also removes the historical source of quadratic blowup in substitution: because a
-/// bound occurrence is a plain integer, substituting into (or under) a binder never needs
-/// capture-avoidance renaming — no "is this name already used anywhere in this subtree"
-/// search, no generating a fresh name, no re-walking the term a second time to apply that
-/// rename. ``instantiated(with:)`` (open a binder — used for both β-reduction and, when
-/// opening with a fresh local variable, for name-based type checking) is a single O(size
-/// actually touched) walk with no name bookkeeping at all.
+/// Substitution and binder opening use de Bruijn indices, so free-variable substitution
+/// and ``instantiated(with:)`` do not need capture-avoidance renaming.
 ///
-/// Derived per-node facts that would otherwise require a full re-traversal — free term
-/// variables, free metavariables, all mentioned names — are computed **once**, at
-/// construction, from the (already-computed) facts of a node's children, and cached as
-/// stored properties. Because children are always already-interned/-cached `Term`s by the
-/// time a parent is built, this is O(children) per node, not O(subtree).
+/// Per-node metadata (free variables, metavariables, match presence) is computed once at
+/// construction from child facts already stored in the arena.
 public struct Term: Equatable, Hashable, Sendable {
 
     /// Hash-consing identity assigned by ``TermArena``, unique per canonical structural
@@ -283,19 +274,8 @@ public enum TermRole: Equatable, Sendable {
 
 extension Term {
 
-    /// Adds `amount` to every ``Kind/boundVariable`` at or above `cutoff` (the number of
-    /// binders already crossed). Used only internally, when a term is moved into a deeper
-    /// (or shallower) binding context than the one it was built in — e.g. re-aligning a
-    /// substituted replacement's own bound variables when it is inserted `cutoff` binders
-    /// deep by ``instantiated(with:)``.
-    ///
-    /// O(size actually touched): subtrees with no bound variable at or above `cutoff` are
-    /// impossible to detect purely from a cached set (unlike free/meta variables, bound
-    /// variables aren't tracked per-node — there are usually only 0–2 in the terms this
-    /// runs on, e.g. a single free variable or argument term), so this is a plain recursive
-    /// walk. It only recurses into terms that are actually substituted in — never into
-    /// unrelated large subtrees — so it never reintroduces the quadratic blowup shifting is
-    /// designed to avoid.
+    /// Shifts bound variables at or above `cutoff` by `amount`. Internal helper for
+    /// ``instantiated(with:)``.
     private func shifted(by amount: Int, cutoff: Int = 0) -> Term {
         guard amount != 0 else { return self }
         if TermArena.shared.maxBoundIndex(for: internID) < cutoff {
@@ -345,13 +325,8 @@ extension Term {
         }
     }
 
-    /// Converts every **free** occurrence of `name` into a ``Kind/boundVariable`` pointing
-    /// at the binder about to be built around `self` (index `depth`, incrementing as we
-    /// descend under further binders). This is the one-time cost of constructing a new
-    /// binder via ``pi(param:type:body:)``/``abstraction(param:type:body:)``: no capture
-    /// avoidance is needed (there is nothing to capture — bound and free variables live in
-    /// disjoint namespaces once this returns), and the cached ``freeVariables`` set lets
-    /// subtrees that don't mention `name` short-circuit in O(1) without being walked.
+    /// Converts free occurrences of `name` to de Bruijn indices for a binder about to wrap
+    /// `self`. Used by ``pi(param:type:body:)`` and ``abstraction(param:type:body:)``.
     fileprivate func abstracting(_ name: String, depth: Int = 0) -> Term {
         guard freeVariables.contains(name) else { return self }
         switch kind {
@@ -393,22 +368,9 @@ extension Term {
         }
     }
 
-    /// **Opens** the binder that would enclose `self`: replaces ``Kind/boundVariable(0)``
-    /// (relative to `self`) with `replacement`, and decrements every deeper bound variable
-    /// by one (there is now one fewer enclosing binder). This is the single primitive
-    /// behind:
-    ///
-    /// - **β-reduction**: `(λx:A. body) arg` reduces to `body.instantiated(with: arg)` —
-    ///   directly, with no name chosen and no separate substitution pass.
-    /// - **Opening a binder for name-based checking**: `body.instantiated(with:
-    ///   .variable(hint))` reconstructs exactly the named term a caller would have gotten
-    ///   from pattern-matching a pre-de-Bruijn `Term` — safe to feed into any
-    ///   environment-keyed (`[String: Term]`) logic unchanged.
-    ///
-    /// Neither use case does any name comparison, freshness search, or variable-name-set
-    /// union: this is why de Bruijn indices remove the quadratic capture-avoidance cost
-    /// that named substitution paid on every deeply-nested binder chain. The whole
-    /// operation is a single O(size actually touched) walk.
+    /// Opens the innermost binder: replace ``Kind/boundVariable(0)`` with `replacement` and
+    /// decrement deeper indices. Used for β-reduction and for opening binders by `hint`
+    /// during type checking.
     func instantiated(with replacement: Term) -> Term {
         substitutingBoundVariable(0, with: replacement)
     }
@@ -479,17 +441,8 @@ extension Term {
         }
     }
 
-    /// Substitutes a **free** variable `name` with `replacement` throughout `self`.
-    ///
-    /// Because bound variables are de Bruijn indices — a namespace entirely disjoint from
-    /// free-variable names — this never needs capture-avoidance: a binder's own bound
-    /// occurrences can never be confused with, or accidentally capture, a free variable
-    /// substitution, no matter what `replacement` contains or what any binder's display
-    /// `hint` happens to be. The pi/abstraction cases below are therefore a plain
-    /// structural recursion into `type` and the (already de Bruijn) `body` — the same shape
-    /// as every other compound case — with no freshening, no variable-name-set unions, and
-    /// no second walk to apply a rename. Combined with the ``freeVariables``-guarded
-    /// short-circuit, this is O(size actually touched), never O(size²).
+    /// Substitutes a free variable throughout `self`. Bound variables are de Bruijn indices,
+    /// so no capture-avoidance renaming is required.
     public func substituting(name: String, with replacement: Term) -> Term {
         guard freeVariables.contains(name) else { return self }
 
@@ -542,10 +495,7 @@ extension Term {
         }
     }
 
-    /// Generates a name outside user syntax (`#0`, `#1`, …). No longer needed for
-    /// capture-avoidance (bound variables are indices now — see ``substituting(name:with:)``),
-    /// but kept as a small general-purpose utility for callers that still want a
-    /// guaranteed-fresh display name.
+    /// Generates a display name outside user syntax (`#0`, `#1`, …).
     static func freshName(avoiding used: Set<String>) -> String {
         var index = 0
         while true {

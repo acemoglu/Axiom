@@ -1,2 +1,1 @@
-// The Swift Programming Language
-// https://docs.swift.org/swift-book
+/// Native Swift kernel for a fragment of the Calculus of Inductive Constructions.

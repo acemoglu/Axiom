@@ -37,10 +37,8 @@ final class BenchmarkTests: XCTestCase {
         try measureParallelIdentity(identity, cores: cores, label: "axiom identity typeCheck parallel-\(cores)")
     }
 
-    /// Depth-500 curried abstraction applied to 500 arguments, re-checking the *same*
-    /// obligation every iteration — the "I already verified this, verify it again" case
-    /// (e.g. re-validating a cached proof/plan). Hash-consing + the global type cache
-    /// (Step 4) turn every iteration after the first into an O(1) lookup.
+    /// Depth-500 curried application, re-checking the same term each iteration. Exercises
+    /// hash-consing and ``GlobalTypeCache`` (O(1) after warm-up).
     func testDeepApplicationThroughput() throws {
         let depth = 500
         let deepFunction = makeDeepCurriedIdentity(depth: depth, salt: "shared")
@@ -64,18 +62,8 @@ final class BenchmarkTests: XCTestCase {
         print("BENCHMARK axiom deep application (depth=\(depth), shared) typeCheck: \(Int(opsPerSec)) ops/sec (n=\(iterations))")
     }
 
-    /// Same depth-500 curried spine, but every iteration is a **structurally unique** term
-    /// (binder names salted by iteration index), so it can never hit the global type
-    /// cache. This isolates the raw substitution/normalization cost the cache-based
-    /// speedup above cannot mask — the honest "brand new AST every time" number.
-    ///
-    /// Historical note: this used to be the O(depth²) case — named substitution paid a
-    /// capture-avoidance ("is this name already used anywhere in this subtree") cost on
-    /// every level of a deep binder chain. Bound variables are now de Bruijn indices (see
-    /// `Term.instantiated(with:)`), which need no such search, so this is O(depth): on
-    /// this machine, the depth-500 fresh case went from ~1 op/sec to several hundred —
-    /// see `testDeepApplicationScalesLinearlyNotQuadratically` below for a direct
-    /// growth-rate assertion.
+    /// Depth-500 curried application with a salted binder name each iteration, so the
+    /// global type cache never hits. Measures full inference on structurally fresh terms.
     func testDeepApplicationFreshThroughput() throws {
         let depth = 500
         let iterations = 50
@@ -122,11 +110,7 @@ final class BenchmarkTests: XCTestCase {
         print("BENCHMARK axiom deep application (depth=\(depth), shared-spine-rebuild-uncached) typeCheck: \(Int(opsPerSec)) ops/sec (n=\(iterations))")
     }
 
-    /// Direct regression guard for the de Bruijn substitution fix: doubling the chain
-    /// depth on a structurally-fresh (never-cached) deep application should roughly
-    /// *double* the time (O(depth)), not *quadruple* it (O(depth²)). We assert a generous
-    /// upper bound (6x for a 2x depth increase) so ordinary timing noise can't flake the
-    /// test, while still failing hard if the quadratic behavior ever comes back.
+    /// Regression guard: doubling binder depth should scale ~linearly, not quadratically.
     func testDeepApplicationScalesLinearlyNotQuadratically() throws {
         // Each call is a structurally-fresh salted term (never cache-hit), repeated enough
         // times per depth to rise well above timer-resolution/scheduling noise.

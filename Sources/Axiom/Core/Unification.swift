@@ -15,8 +15,7 @@ public enum UnificationError: Error, Equatable, Sendable {
 /// **Unification** engine for metavariables in CIC terms.
 ///
 /// Unification finds a substitution *σ* such that *σ(t₁) =β σ(t₂)*. Metavariables
-/// (``Term/hole``) are solved and recorded in ``context``; term variables bound by λ/Π
-/// are handled via freshening when unifying binders with different names.
+/// (``Term/hole``) are solved and recorded in ``context``.
 public struct Unifier {
 
     /// Unifies ``t1`` and ``t2``, extending ``context`` with solutions for metavariables.

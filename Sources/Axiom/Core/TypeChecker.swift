@@ -89,13 +89,9 @@ public struct TypeChecker {
         try typeCheck(term: term, environment: environment, expectedType: nil)
     }
 
-    /// Step 4 of the hash-consing performance model: a **type cache**. Pure inference
-    /// queries (`expectedType == nil`) on a term proven context-independent
-    /// (``Term/isGloballyCacheable``) are memoized process-wide in ``GlobalTypeCache`` —
-    /// re-checking the exact same obligation (the common "shared/repeated term" case) is
-    /// O(1) after the first check, bypassing inference, normalization, and substitution
-    /// entirely. Terms that fail the cacheability test are simply never cached; every
-    /// other guarantee below is unaffected.
+    /// Memoizes pure inference (`expectedType == nil`) for context-independent terms
+    /// (``Term/isGloballyCacheable``) in ``GlobalTypeCache``. Re-checking the same closed
+    /// obligation is O(1) after the first check. Non-cacheable terms are never stored.
     private mutating func typeCheck(
         term: Term,
         environment: [String: Term],
@@ -1023,13 +1019,8 @@ public struct TypeChecker {
 
     /// Applies motive *C* to constructor instance *c x₁ … xₙ*: *C (c x₁ … xₙ)*.
     ///
-    /// Because the motive's own bound variable is a de Bruijn index — not the name
-    /// `motiveParam` — it can never collide with (or need renaming away from) a
-    /// constructor/branch parameter name, however they happen to be spelled. Instantiating
-    /// the motive's raw body with `instance` directly both replaces the old two-step
-    /// "α-rename away from a collision, then substitute by name" dance with a single
-    /// direct substitution, and sidesteps the exact class of capture bug that dance
-    /// defended against.
+    /// The motive binder is a de Bruijn index, so instantiate the raw body directly with
+    /// `instance`; no binder-name collision handling is required.
     private func applyMotive(_ motive: Term, to instance: Term) -> Term {
         if case .abstraction(_, _, let rawBody) = motive.kind {
             return rawBody.instantiated(with: instance)

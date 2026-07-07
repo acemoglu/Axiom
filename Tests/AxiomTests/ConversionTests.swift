@@ -22,8 +22,8 @@ final class ConversionTests: XCTestCase {
         XCTAssertEqual(Term.freshName(avoiding: used), "#1")
     }
 
-    func testSubstitutionFreshensWhenReplacementCapturesBinder() {
-        // [z := x] in λx. z — replacement mentions binder x, so freshen to #0.
+    func testSubstitutionIgnoresBinderHintWhenNamesCollide() {
+        // [z := x] in λx. z — hints are display-only; body becomes free `x`, not a bound index.
         let term = Term.abstraction(
             param: "x",
             type: .universe(0),

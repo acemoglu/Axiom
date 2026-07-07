@@ -4,7 +4,7 @@ import XCTest
 /// Stress / throughput probes for the trusted kernel (not correctness suites).
 final class TrustedKernelStressTests: XCTestCase {
 
-    // TEST 1: Deep application chain
+    // Deep application chain throughput.
     func testDeepApplication() throws {
         // id₁ : Π(x : Type₁). Type₁  —  argument must live in Type₁.
         // Type₀ as a term has type Type₁, so we iterate at that level.
@@ -28,7 +28,7 @@ final class TrustedKernelStressTests: XCTestCase {
         print("========================================\n")
     }
 
-    // TEST 2: Fail-fast on bogus LLM output (type mismatch)
+    // Fail-fast throughput on a type mismatch.
     func testFailFast() {
         let id = Term.abstraction(param: "x", type: .universe(0), body: .variable("x"))
         let iterations = 100_000

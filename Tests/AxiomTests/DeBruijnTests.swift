@@ -1,9 +1,7 @@
 import XCTest
 @testable import Axiom
 
-/// Targeted tests for the de Bruijn binding representation: alpha-equivalence via
-/// hash-consing, and the shift/instantiate primitives that replaced named substitution's
-/// capture-avoidance machinery.
+/// Tests for de Bruijn indices, alpha-equivalence via hash-consing, and shift/instantiate.
 final class DeBruijnTests: XCTestCase {
 
     private let type0 = Term.universe(0)
@@ -62,11 +60,8 @@ final class DeBruijnTests: XCTestCase {
 
     // MARK: - Shift correctness under nested binders
 
-    /// `λf. (λx. λy. x) f` β-reduces to `λf. λy. f`: the argument `f` references the
-    /// *outer* binder (index 0 relative to its own position), and substituting it two
-    /// binders deep must shift it to index 1 so it still points at `λf` once inserted
-    /// under the intervening `λy`. A off-by-one in `shifted`/`instantiated` would instead
-    /// produce a dangling or mis-scoped reference here.
+    /// β-reduction must shift an outer binder reference when the argument is inserted under
+    /// inner binders (`λf. (λx. λy. x) f` → `λf. λy. f`).
     func testShiftRealignsOuterBoundVariableWhenInsertedUnderAnotherBinder() throws {
         let inner = Term.abstraction(
             param: "x",
@@ -89,9 +84,7 @@ final class DeBruijnTests: XCTestCase {
         XCTAssertEqual(reduced, expected)
     }
 
-    /// "twice" — `λf. λx. f (f x)` — applied to `succ`/`zero`-shaped placeholders exercises
-    /// two sequential substitutions into a shared sub-occurrence of the *same* bound `f`,
-    /// which must resolve to the same free variable both times.
+    /// `twice f x = f (f x)` with placeholder globals `succ` and `zero`.
     func testTwiceCombinatorappliesFunctionArgumentTwice() throws {
         let twice = Term.abstraction(
             param: "f",
@@ -118,11 +111,7 @@ final class DeBruijnTests: XCTestCase {
 
     // MARK: - Dependent binder chains open consistently by hint
 
-    /// Peeling a dependent Π-chain (`Π(n:Nat). Π(a:A). Vec A n`, i.e. the shape of
-    /// `Vec.cons`'s index) and opening each level with its own hint must let the *later*
-    /// domain's reference to the *earlier* parameter resolve back to a named free
-    /// variable — the same invariant `InductiveFamily`/`TypeChecker` rely on when they
-    /// independently re-walk the same stored `Term`.
+    /// Opening a dependent Π-chain by hint must resolve earlier parameters by name.
     func testDependentPiChainOpensEarlierParameterByName() {
         let nat = Term.variable("Nat")
         let vecAn = Term.application(
@@ -149,12 +138,9 @@ final class DeBruijnTests: XCTestCase {
         XCTAssertEqual(innerBody, vecAn.substituting(name: "n", with: .variable(outerHint)))
     }
 
-    // MARK: - Substitution no longer needs (or does) capture-avoidance renaming
+    // MARK: - Free-variable substitution
 
-    /// `[z := x] in (λx. z)`: since the binder's own occurrences are indices, the
-    /// substituted-in free `x` can never be captured by the binder — no renaming occurs,
-    /// and the result is exactly "the same binder, body replaced", regardless of the fact
-    /// that the substituted name collides textually with the binder's display hint.
+    /// `[z := x] in (λx. z)` leaves a free `x` in the body; binder hints do not capture it.
     func testFreeVariableSubstitutionNeverCapturesBoundIndex() {
         let term = Term.abstraction(param: "x", type: type0, body: .variable("z"))
         let result = term.substituting(name: "z", with: .variable("x"))
@@ -162,13 +148,10 @@ final class DeBruijnTests: XCTestCase {
         guard case .abstraction(_, _, let rawBody) = result.kind else {
             return XCTFail("expected abstraction")
         }
-        // The body is the free variable "x" (unaffected by the binder), not a bound index.
+        // Body is free `x`, not a bound index.
         XCTAssertEqual(rawBody, Term.variable("x"))
 
-        // Opening the result with any name reproduces the same free "x" — confirming the
-        // outer substitution result behaves as the constant function "return the
-        // substituted x", exactly the capture-free reading the old freshening-based
-        // implementation had to work to construct explicitly.
+        // Opening with any hint still yields free `x`.
         XCTAssertEqual(rawBody.instantiated(with: .variable("anything")), Term.variable("x"))
     }
 }
