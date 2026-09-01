@@ -156,6 +156,10 @@ public struct TypeChecker {
             }
             let body = rawBody.instantiated(with: .variable(param))
             let resolvedParamType = resolvePatternType(paramType, name: param, environment: environment)
+            if resolvedParamType.freeMetavariables.isEmpty {
+                let domainSort = try typeCheck(term: resolvedParamType, environment: environment)
+                _ = try expectUniverseLevel(of: resolvedParamType, inferredType: domainSort)
+            }
             var extended = environment
             extended[param] = resolvedParamType
             let bodyExpected = try expectedType.flatMap {
@@ -439,8 +443,13 @@ public struct TypeChecker {
         var extended = environment
         var rawBody = term
 
-        while case .abstraction(let hint, let paramType, let body) = rawBody.kind {
+        while case .abstraction(let hint, let rawParamType, let body) = rawBody.kind {
+            let paramType = openDeBruijn(rawParamType, binderCount: params.count, hints: params.map(\.hint))
             let resolvedType = resolvePatternType(paramType, name: hint, environment: extended)
+            if resolvedType.freeMetavariables.isEmpty {
+                let domainSort = try typeCheck(term: resolvedType, environment: extended)
+                _ = try expectUniverseLevel(of: resolvedType, inferredType: domainSort)
+            }
             params.append((hint, resolvedType))
             extended[hint] = resolvedType
             rawBody = body
