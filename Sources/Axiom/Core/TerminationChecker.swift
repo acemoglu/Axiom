@@ -21,7 +21,7 @@ public struct TerminationChecker {
               case .variable(let scrutineeName) = scrutinee.kind else {
             throw TerminationError.recursionNotOnMatch(name)
         }
-        guard parameters.contains(scrutineeName) else {
+        guard let scrutineeIndex = parameters.firstIndex(of: scrutineeName) else {
             throw TerminationError.recursionNotOnMatch(name)
         }
 
@@ -36,6 +36,7 @@ public struct TerminationChecker {
             for arguments in callArgumentTerms(in: branch, targets: cluster) {
                 try validateStructuralDescent(
                     arguments: arguments,
+                    scrutineeIndex: scrutineeIndex,
                     binders: binders,
                     definitionName: name
                 )
@@ -90,22 +91,26 @@ public struct TerminationChecker {
         )
     }
 
+    /// Requires strict structural descent on the *matched* parameter only.
+    /// Descent on a different argument does not guarantee termination of the
+    /// recursive measure induced by the outer match scrutinee.
     private func validateStructuralDescent(
         arguments: [Term],
+        scrutineeIndex: Int,
         binders: Set<String>,
         definitionName: String
     ) throws {
-        guard !arguments.isEmpty else {
+        guard scrutineeIndex < arguments.count else {
             throw TerminationError.recursionNotOnSmallerArgument(
                 definitionName,
                 callArgument: "$nonvar"
             )
         }
-        guard arguments.contains(where: { isStrictStructuralDescent($0, binders: binders) }) else {
-            let reported = arguments.map(describeArgument).joined(separator: ", ")
+        let measureArgument = arguments[scrutineeIndex]
+        guard isStrictStructuralDescent(measureArgument, binders: binders) else {
             throw TerminationError.recursionNotOnSmallerArgument(
                 definitionName,
-                callArgument: reported
+                callArgument: describeArgument(measureArgument)
             )
         }
     }

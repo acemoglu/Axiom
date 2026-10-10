@@ -98,6 +98,49 @@ final class TerminationTests: XCTestCase {
         }
     }
 
+    /// Recursion that shrinks a *non-scrutinee* argument while keeping the matched
+    /// parameter unchanged must be rejected — any-argument descent is unsound.
+    func testRejectsDescentOnNonScrutineeArgument() throws {
+        let bad = Term.abstraction(
+            param: "n",
+            type: nat,
+            body: Term.abstraction(
+                param: "m",
+                type: nat,
+                body: Term.match(
+                    scrutinee: .variable("n"),
+                    motive: natMotive(returnType: nat),
+                    cases: [
+                        "zero": .variable("m"),
+                        "succ": Term.abstraction(
+                            param: "k",
+                            type: nat,
+                            body: Term.application(
+                                function: .application(
+                                    function: .variable("bad"),
+                                    argument: .variable("n")
+                                ),
+                                argument: .variable("k")
+                            )
+                        ),
+                    ]
+                )
+            )
+        )
+
+        XCTAssertThrowsError(
+            try TerminationChecker().checkDefinition(name: "bad", value: bad)
+        ) { error in
+            guard case .recursionNotOnSmallerArgument(let name, let callArgument) =
+                error as? TerminationError
+            else {
+                return XCTFail("Expected recursionNotOnSmallerArgument, got \(error)")
+            }
+            XCTAssertEqual(name, "bad")
+            XCTAssertEqual(callArgument, "n")
+        }
+    }
+
     func testRejectsRecursionWithoutMatch() throws {
         let loop = Term.abstraction(
             param: "n",
