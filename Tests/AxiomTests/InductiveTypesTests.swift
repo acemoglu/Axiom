@@ -771,10 +771,11 @@ final class InductiveTypesTests: XCTestCase {
                 ]
             )
         ) { error in
-            guard case .indexMismatch(let constructor, _, _) = error as? TypeError else {
+            // Either constructor may fail first: `vnil` has the wrong index, and after
+            // binder freshening the `vcons` branch no longer silently aliases outer `k`.
+            guard case .indexMismatch = error as? TypeError else {
                 return XCTFail("Expected indexMismatch, got \(error)")
             }
-            XCTAssertEqual(constructor, "vnil")
         }
     }
 

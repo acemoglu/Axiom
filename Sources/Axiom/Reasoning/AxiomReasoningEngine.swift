@@ -141,11 +141,22 @@ public struct AxiomReasoningEngine: Sendable {
         // Infer only. Do **not** `checkTermMatchesType` while holes remain: unifying a
         // proof-hole's inferred type (the hole itself) against the goal would solve the
         // hole *to the goal type*, turning types into spurious "proofs".
+        //
+        // Pass only open-hole goals as the environment — not `localContext`. The partial
+        // term already binds intro parameters as abstractions; feeding those names in
+        // again triggers binder freshening (`#0`, `#1`, …) and falsely prunes valid intros.
+        var holeEnv: [String: Term] = [:]
+        for openHole in elaborated.openHoles {
+            if let goal = elaborated.holeGoals[openHole] {
+                holeEnv[openHole] = goal
+            }
+        }
+
         let inferredType: Term
         do {
             inferredType = try checker.typeCheck(
                 term: term,
-                environment: elaborated.localContext
+                environment: holeEnv
             )
         } catch is TypeError {
             return .pruned
@@ -162,7 +173,7 @@ public struct AxiomReasoningEngine: Sendable {
                 try closedChecker.checkTermMatchesType(
                     instantiated,
                     expected: targetType,
-                    environment: elaborated.localContext
+                    environment: [:]
                 )
                 return .complete(closedChecker.instantiateHoles(in: instantiated))
             } catch {

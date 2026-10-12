@@ -527,6 +527,34 @@ final class SoundnessTests: XCTestCase {
         XCTAssertEqual(reduced, zero)
     }
 
+    /// Same surface hint on nested binders must not collapse distinct de Bruijn levels
+    /// into one environment entry (type confusion / variable capture).
+    func testSameHintNestedBindersFreshenPreserveOuterReference() throws {
+        var env = try natEnvironment()
+        try env.add(Declaration(name: "False", kind: .inductive, type: .universe(0)))
+        try env.closeInductive("False")
+        let falseType = Term.variable("False")
+
+        // λx:Nat. λx:False. #1  — body refers to the *outer* Nat binder
+        let term = Term.rawAbstraction(
+            hint: "x",
+            type: nat,
+            body: Term.rawAbstraction(
+                hint: "x",
+                type: falseType,
+                body: Term.rawBoundVariable(1)
+            )
+        )
+
+        let inferred = try TypeChecker.typeCheck(term: term, declarations: env)
+        let expected = Term.pi(
+            param: "x",
+            type: nat,
+            body: Term.pi(param: "#0", type: falseType, body: nat)
+        )
+        XCTAssertEqual(inferred, expected)
+    }
+
     // MARK: - Pi universe level (predicativity)
 
     /// Axiom's Π rule uses the sort of each component (Typeₙ : Typeₙ₊₁), so

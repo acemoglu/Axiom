@@ -441,17 +441,19 @@ public struct TypeChecker {
     ) throws -> Term {
         var params: [(hint: String, type: Term)] = []
         var extended = environment
+        var usedNames = Set(environment.keys)
         var rawBody = term
 
         while case .abstraction(let hint, let rawParamType, let body) = rawBody.kind {
+            let name = freshenBinderHint(hint, used: &usedNames)
             let paramType = openDeBruijn(rawParamType, binderCount: params.count, hints: params.map(\.hint))
-            let resolvedType = resolvePatternType(paramType, name: hint, environment: extended)
+            let resolvedType = resolvePatternType(paramType, name: name, environment: extended)
             if resolvedType.freeMetavariables.isEmpty {
                 let domainSort = try typeCheck(term: resolvedType, environment: extended)
                 _ = try expectUniverseLevel(of: resolvedType, inferredType: domainSort)
             }
-            params.append((hint, resolvedType))
-            extended[hint] = resolvedType
+            params.append((name, resolvedType))
+            extended[name] = resolvedType
             rawBody = body
         }
 
@@ -1048,7 +1050,11 @@ public struct TypeChecker {
         environment: [String: Term]
     ) throws -> (Term, [String: Term]) {
         let parameters = peelPiParams(from: constructorType)
-        let branchLambdaParams = peelLambdaParams(from: branch, expectedArity: parameters.count)
+        let branchLambdaParams = peelLambdaParams(
+            from: branch,
+            expectedArity: parameters.count,
+            avoiding: environment
+        )
         let binderSubstitutions = constructorToBranchBinderSubstitutions(
             constructorParameters: parameters,
             branchLambdaParameters: branchLambdaParams
@@ -1188,14 +1194,29 @@ public struct TypeChecker {
         }
     }
 
-    private func peelLambdaParams(from term: Term, expectedArity: Int) -> [(String, Term)] {
+    /// Peels a λ-telescope, freshening binder hints that collide with `environment` or
+    /// earlier opened parameters so locally nameless opening cannot capture outer names.
+    private func peelLambdaParams(
+        from term: Term,
+        expectedArity: Int,
+        avoiding environment: [String: Term]
+    ) -> [(String, Term)] {
         var params: [(String, Term)] = []
         var current = term
-        while params.count < expectedArity, case .abstraction(let name, let type, let rawBody) = current.kind {
+        var usedNames = Set(environment.keys)
+        while params.count < expectedArity, case .abstraction(let hint, let type, let rawBody) = current.kind {
+            let name = freshenBinderHint(hint, used: &usedNames)
             params.append((name, type))
             current = rawBody.instantiated(with: .variable(name))
         }
         return params
+    }
+
+    /// Returns `hint` when unused; otherwise a `#n` name from ``Term.freshName(avoiding:)``.
+    private func freshenBinderHint(_ hint: String, used: inout Set<String>) -> String {
+        let name = used.contains(hint) ? Term.freshName(avoiding: used) : hint
+        used.insert(name)
+        return name
     }
 
     private func constructorToBranchBinderSubstitutions(
