@@ -156,23 +156,25 @@ public struct TypeChecker {
             if expectedType == nil {
                 return try typeCheckAbstractionSpine(term: term, environment: environment)
             }
-            let body = rawBody.instantiated(with: .variable(param))
-            let resolvedParamType = resolvePatternType(paramType, name: param, environment: environment)
+            var usedNames = Set(environment.keys)
+            let name = freshenBinderHint(param, used: &usedNames)
+            let body = rawBody.instantiated(with: .variable(name))
+            let resolvedParamType = resolvePatternType(paramType, name: name, environment: environment)
             if resolvedParamType.freeMetavariables.isEmpty {
                 let domainSort = try typeCheck(term: resolvedParamType, environment: environment)
                 _ = try expectUniverseLevel(of: resolvedParamType, inferredType: domainSort)
             }
             var extended = environment
-            extended[param] = resolvedParamType
+            extended[name] = resolvedParamType
             let bodyExpected = try expectedType.flatMap {
-                try peelExpectedAbstractionBody($0, param: param, paramType: resolvedParamType)
+                try peelExpectedAbstractionBody($0, param: name, paramType: resolvedParamType)
             }
             let bodyType = try typeCheck(
                 term: body,
                 environment: extended,
                 expectedType: bodyExpected
             )
-            return .pi(param: param, type: resolvedParamType, body: bodyType)
+            return .pi(param: name, type: resolvedParamType, body: bodyType)
 
         case .application(let function, let argument):
             if function.role == .declaration || argument.role == .declaration {
@@ -984,10 +986,8 @@ public struct TypeChecker {
         } catch {
             return nil
         }
-        // Open with the abstraction-under-check's own `param`: this expected type is only
-        // ever compared against a body already opened with that same name (see the
-        // `.abstraction` case above), so using it here keeps both sides referring to the
-        // same free variable.
+        // Open with the abstraction-under-check's binder name (already freshened when it
+        // collided). The body was opened with that same name, so both sides share it.
         return rawBody.instantiated(with: .variable(param))
     }
 

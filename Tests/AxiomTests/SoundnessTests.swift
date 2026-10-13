@@ -577,6 +577,42 @@ final class SoundnessTests: XCTestCase {
         XCTAssertEqual(inferred, .universe(1))
     }
 
+    /// Checking λx:Nat. λx:False. #1 against its Π type must keep the outer binder.
+    /// This path passes an expected type, so it does not use the inference spine.
+    func testSameHintNestedAbstractionCheckedAgainstExpectedTypePreservesOuterBinder() throws {
+        var env = try natEnvironment()
+        try env.add(Declaration(name: "False", kind: .inductive, type: .universe(0)))
+        try env.closeInductive("False")
+        let falseType = Term.variable("False")
+
+        let value = Term.rawAbstraction(
+            hint: "x",
+            type: nat,
+            body: Term.rawAbstraction(
+                hint: "x",
+                type: falseType,
+                body: Term.rawBoundVariable(1)
+            )
+        )
+        let declaredType = Term.pi(
+            param: "x",
+            type: nat,
+            body: Term.pi(param: "x", type: falseType, body: nat)
+        )
+
+        var checker = TypeChecker(declarations: env)
+        XCTAssertNoThrow(
+            try checker.checkDeclaration(
+                Declaration(
+                    name: "pickOuter",
+                    kind: .definition,
+                    type: declaredType,
+                    value: value
+                )
+            )
+        )
+    }
+
     // MARK: - Pi universe level (predicativity)
 
     /// Axiom's Π rule uses the sort of each component (Typeₙ : Typeₙ₊₁), so
