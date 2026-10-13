@@ -53,6 +53,31 @@ final class SoundnessTests: XCTestCase {
         }
     }
 
+    /// A term of type Type₀ is accepted where Type₁ is expected. The sorts stay apart.
+    func testLowerUniverseIsAcceptedWhereHigherUniverseIsExpected() throws {
+        var checker = TypeChecker()
+        XCTAssertNoThrow(
+            try checker.checkTermMatchesType(
+                .variable("A"),
+                expected: .universe(1),
+                environment: ["A": .universe(0)]
+            )
+        )
+        XCTAssertFalse(try Conversion().areDefinitionallyEqual(.universe(0), .universe(1)))
+
+        XCTAssertThrowsError(
+            try checker.checkTermMatchesType(
+                .variable("B"),
+                expected: .universe(0),
+                environment: ["B": .universe(1)]
+            )
+        ) { error in
+            guard case .typeMismatch = error as? TypeError else {
+                return XCTFail("Expected typeMismatch, got \(error)")
+            }
+        }
+    }
+
     // MARK: - Identity (ACCEPT / REJECT)
 
     func testIdentityHasPiType() throws {

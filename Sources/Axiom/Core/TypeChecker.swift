@@ -272,7 +272,7 @@ public struct TypeChecker {
                         environment: branchEnvironment,
                         expectedType: expectedBranchType
                     )
-                    try ensureConvertibleOrInfer(expected: expectedBranchType, actual: branchType)
+                    try ensureSubtype(expected: expectedBranchType, actual: branchType)
                 }
             }
             return instantiateHoles(
@@ -351,7 +351,7 @@ public struct TypeChecker {
         if requiresFullyResolvedTerms(declaration.kind) {
             try rejectUnresolvedTermHoles(in: value)
         }
-        try ensureConvertible(expected: declaration.type, actual: valueType)
+        try ensureSubtype(expected: declaration.type, actual: valueType, solvingHoles: false)
         try registerDeclaration(declaration)
     }
 
@@ -362,7 +362,7 @@ public struct TypeChecker {
         environment: [String: Term] = [:]
     ) throws {
         let actual = try typeCheck(term: term, environment: environment)
-        try ensureConvertibleOrInfer(expected: expected, actual: actual)
+        try ensureSubtype(expected: expected, actual: actual)
     }
 
     /// Convenience: type-check with a fresh checker and return an instantiated type.
@@ -557,7 +557,7 @@ public struct TypeChecker {
             throw TypeError.notAFunction(blame, functionType)
         }
         let argumentType = try typeCheck(term: argument, environment: environment, expectedType: nil)
-        try ensureConvertibleOrInfer(expected: domain, actual: argumentType)
+        try ensureSubtype(expected: domain, actual: argumentType)
         // Non-dependent Π: when the codomain mentions no bound variables, the parameter
         // being applied is unused in the return type — peel the outer Π by taking `body`
         // directly instead of walking the full instantiate spine (O(1) vs O(depth)).
@@ -574,6 +574,31 @@ public struct TypeChecker {
     private mutating func piHeadIfNeeded(_ term: Term) throws -> Term {
         if case .pi = term.kind { return term }
         return try normalizeForChecking(term)
+    }
+
+    /// Expected type may be a higher universe than the inferred type.
+    /// `Typeᵢ ≤ Typeⱼ` when `i ≤ j`. This is not definitional equality.
+    private mutating func ensureSubtype(
+        expected: Term,
+        actual: Term,
+        solvingHoles: Bool = true
+    ) throws {
+        do {
+            if solvingHoles {
+                try ensureConvertibleOrInfer(expected: expected, actual: actual)
+            } else {
+                try ensureConvertible(expected: expected, actual: actual)
+            }
+        } catch let TypeError.typeMismatch {
+            let subtype = try normalizedForComparison(actual)
+            let supertype = try normalizedForComparison(expected)
+            guard case .universe(let lower) = subtype.kind,
+                  case .universe(let upper) = supertype.kind,
+                  lower <= upper
+            else {
+                throw TypeError.typeMismatch(expected: expected, actual: actual)
+            }
+        }
     }
 
     /// Definitional equality only — no metavariable solving (trusted checking).

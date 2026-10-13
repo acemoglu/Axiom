@@ -227,7 +227,7 @@ v1.0 is the soundness floor on the road to a trusted kernel. The model that reas
 
 ## Known limitations
 
-Minimal CIC fragment today: no `let`, no `Prop`, no cumulativity. η is function extensionality only (`λx. f x ≡ f`). No parser, no tactics, no Mathlib. Soundness evidence today is engineering plus tests, not a formal certificate yet. The inconsistency guard hardening and differential/property-based testing against established kernels are part of the path to stronger v1.0 soundness claims.
+Minimal CIC fragment today: no `let`, no `Prop`. η is function extensionality only (`λx. f x ≡ f`). Universe cumulativity is `Typeᵢ ≤ Typeⱼ` for `i ≤ j`; it does not yet lift through Π. No parser, no tactics, no Mathlib. Soundness evidence today is engineering plus tests, not a formal certificate yet. The inconsistency guard hardening and differential/property-based testing against established kernels are part of the path to stronger v1.0 soundness claims.
 
 Structural termination is intentionally narrow. A recursive definition is accepted only when, after the outer lambdas, the body is a `match` on one parameter, and every recursive call passes a pattern binder of that match in that parameter's argument position. Descent on a different argument does not count. Nested recursion, well-founded measures, and size-change termination are rejected. This misses some terminating functions; it does not accept the unsound "any argument got smaller" pattern.
 
