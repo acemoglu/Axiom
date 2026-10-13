@@ -79,6 +79,23 @@ public struct UniverseChecker {
                 inductiveLevel: inductiveLevel
             )
 
+        case .localLet(_, let declaredType, let value, let body):
+            try checkNoImpredicativeQuantification(
+                declaredType,
+                inductiveName: inductiveName,
+                inductiveLevel: inductiveLevel
+            )
+            try checkNoImpredicativeQuantification(
+                value,
+                inductiveName: inductiveName,
+                inductiveLevel: inductiveLevel
+            )
+            try checkNoImpredicativeQuantification(
+                body,
+                inductiveName: inductiveName,
+                inductiveLevel: inductiveLevel
+            )
+
         case .application(let function, let argument):
             try checkNoImpredicativeQuantification(
                 function,

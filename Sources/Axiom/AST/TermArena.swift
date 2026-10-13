@@ -114,6 +114,10 @@ final class TermArena: @unchecked Sendable {
                 result.formUnion(storage[Int(branch)].freeVariables)
             }
             return result
+        case .localLet(_, let type, let value, let body):
+            return storage[Int(type)].freeVariables
+                .union(storage[Int(value)].freeVariables)
+                .union(storage[Int(body)].freeVariables)
         }
     }
 
@@ -137,6 +141,10 @@ final class TermArena: @unchecked Sendable {
                 result.formUnion(storage[Int(branch)].freeMetavariables)
             }
             return result
+        case .localLet(_, let type, let value, let body):
+            return storage[Int(type)].freeMetavariables
+                .union(storage[Int(value)].freeMetavariables)
+                .union(storage[Int(body)].freeMetavariables)
         }
     }
 
@@ -154,6 +162,10 @@ final class TermArena: @unchecked Sendable {
             return storage[Int(type)].containsMatch
         case .match:
             return true
+        case .localLet(_, let type, let value, let body):
+            return storage[Int(type)].containsMatch
+                || storage[Int(value)].containsMatch
+                || storage[Int(body)].containsMatch
         }
     }
 
@@ -175,6 +187,10 @@ final class TermArena: @unchecked Sendable {
             if storage[Int(scrutinee)].hasBoundVariables { return true }
             if storage[Int(motive)].hasBoundVariables { return true }
             return cases.values.contains { storage[Int($0)].hasBoundVariables }
+        case .localLet(_, let type, let value, let body):
+            return storage[Int(type)].hasBoundVariables
+                || storage[Int(value)].hasBoundVariables
+                || storage[Int(body)].hasBoundVariables
         }
     }
 
@@ -204,6 +220,12 @@ final class TermArena: @unchecked Sendable {
                 maxIndex = max(maxIndex, storage[Int(branch)].maxBoundIndex)
             }
             return maxIndex
+        case .localLet(_, let type, let value, let body):
+            let inType = storage[Int(type)].maxBoundIndex
+            let inValue = storage[Int(value)].maxBoundIndex
+            let inBody = storage[Int(body)].maxBoundIndex
+            let shiftedBody = inBody >= 0 ? inBody + 1 : -1
+            return max(inType, inValue, shiftedBody)
         }
     }
 }
@@ -232,6 +254,7 @@ enum TermKindStorage {
     case inductive(name: String, type: Int32)
     case constructor(name: String, inductiveName: String, type: Int32)
     case match(scrutinee: Int32, motive: Int32, cases: [String: Int32])
+    case localLet(hint: String, type: Int32, value: Int32, body: Int32)
 
     init(kind: Term.Kind) {
         switch kind {
@@ -258,6 +281,13 @@ enum TermKindStorage {
                 scrutinee: scrutinee.internID,
                 motive: motive.internID,
                 cases: Dictionary(uniqueKeysWithValues: cases.map { ($0.key, $0.value.internID) })
+            )
+        case .localLet(let hint, let type, let value, let body):
+            self = .localLet(
+                hint: hint,
+                type: type.internID,
+                value: value.internID,
+                body: body.internID
             )
         }
     }
@@ -287,6 +317,13 @@ enum TermKindStorage {
                 scrutinee: Term(internID: scrutinee),
                 motive: Term(internID: motive),
                 cases: Dictionary(uniqueKeysWithValues: cases.map { ($0.key, Term(internID: $0.value)) })
+            )
+        case .localLet(let hint, let type, let value, let body):
+            return .localLet(
+                hint: hint,
+                type: Term(internID: type),
+                value: Term(internID: value),
+                body: Term(internID: body)
             )
         }
     }
@@ -337,6 +374,8 @@ extension TermKindStorage {
                 guard let rv = rc[branchName], lv == rv else { return false }
             }
             return true
+        case (.localLet(_, let lt, let lv, let lb), .localLet(_, let rt, let rv, let rb)):
+            return lt == rt && lv == rv && lb == rb
         default:
             return false
         }
@@ -377,6 +416,11 @@ extension TermKindStorage {
             hasher.combine(name)
             hasher.combine(inductiveName)
             hasher.combine(type)
+        case .localLet(_, let type, let value, let body):
+            hasher.combine(10)
+            hasher.combine(type)
+            hasher.combine(value)
+            hasher.combine(body)
         case .match(let scrutinee, let motive, let cases):
             hasher.combine(8)
             hasher.combine(scrutinee)

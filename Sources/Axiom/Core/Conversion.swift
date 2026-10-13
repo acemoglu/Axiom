@@ -74,6 +74,13 @@ public struct Conversion {
                 )
             }
             return .application(function: reducedFunction, argument: argument)
+        case .localLet(_, _, let value, let body):
+            let reducedValue = try weakHeadNormalize(value, budget: &budget, unfolding: unfolding)
+            return try weakHeadNormalize(
+                body.instantiated(with: reducedValue),
+                budget: &budget,
+                unfolding: unfolding
+            )
         case .match(let scrutinee, let motive, let cases):
             return try .match(
                 scrutinee: weakHeadNormalize(scrutinee, budget: &budget, unfolding: unfolding),
@@ -109,6 +116,13 @@ public struct Conversion {
             let rebuilt = Term.rawAbstraction(hint: hint, type: etaShort(type), body: etaShort(body))
             if let reduct = rebuilt.etaReduct() { return etaShort(reduct) }
             return rebuilt
+        case .localLet(let hint, let type, let value, let body):
+            return .rawLocalLet(
+                hint: hint,
+                type: etaShort(type),
+                value: etaShort(value),
+                body: etaShort(body)
+            )
         case .pi(let hint, let type, let body):
             return .rawPi(hint: hint, type: etaShort(type), body: etaShort(body))
         case .inductive(let name, let type):

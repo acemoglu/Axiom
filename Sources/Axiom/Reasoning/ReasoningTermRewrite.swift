@@ -30,6 +30,14 @@ enum ReasoningTermRewrite {
                 body: substitutingHole(body, name: name, with: replacement)
             )
 
+        case .localLet(let hint, let type, let value, let body):
+            return .rawLocalLet(
+                hint: hint,
+                type: substitutingHole(type, name: name, with: replacement),
+                value: substitutingHole(value, name: name, with: replacement),
+                body: substitutingHole(body, name: name, with: replacement)
+            )
+
         case .inductive(let inductiveName, let type):
             return .inductive(
                 name: inductiveName,

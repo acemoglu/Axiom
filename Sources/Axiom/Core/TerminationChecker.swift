@@ -147,6 +147,10 @@ public struct TerminationChecker {
             // parameters, so a call site is always `.variable(globalName)` regardless of
             // whether enclosing binders are opened — walking the raw de Bruijn body is safe.
             collectCalleeNames(in: body, among: names, into: &callees)
+        case .localLet(_, let type, let value, let body):
+            collectCalleeNames(in: type, among: names, into: &callees)
+            collectCalleeNames(in: value, among: names, into: &callees)
+            collectCalleeNames(in: body, among: names, into: &callees)
         case .match(let scrutinee, let motive, let cases):
             collectCalleeNames(in: scrutinee, among: names, into: &callees)
             collectCalleeNames(in: motive, among: names, into: &callees)
@@ -258,6 +262,10 @@ public struct TerminationChecker {
             return containsCall(to: targets, in: function) || containsCall(to: targets, in: argument)
         case .abstraction(_, _, let body):
             return containsCall(to: targets, in: body)
+        case .localLet(_, let type, let value, let body):
+            return containsCall(to: targets, in: type)
+                || containsCall(to: targets, in: value)
+                || containsCall(to: targets, in: body)
         case .match(let scrutinee, _, let cases):
             return containsCall(to: targets, in: scrutinee)
                 || cases.values.contains { containsCall(to: targets, in: $0) }
@@ -282,6 +290,10 @@ public struct TerminationChecker {
                 || containsBareRecursiveReference(in: argument, targets: targets)
         case .abstraction(_, _, let body):
             return containsBareRecursiveReference(in: body, targets: targets)
+        case .localLet(_, let type, let value, let body):
+            return containsBareRecursiveReference(in: type, targets: targets)
+                || containsBareRecursiveReference(in: value, targets: targets)
+                || containsBareRecursiveReference(in: body, targets: targets)
         case .match(let scrutinee, _, let cases):
             return containsBareRecursiveReference(in: scrutinee, targets: targets)
                 || cases.values.contains { containsBareRecursiveReference(in: $0, targets: targets) }
@@ -329,6 +341,10 @@ public struct TerminationChecker {
             collectCallSites(argument, targets: targets, into: &sites)
         case .pi(let hint, let domain, let rawBody):
             collectCallSites(domain, targets: targets, into: &sites)
+            collectCallSites(rawBody.instantiated(with: .variable(hint)), targets: targets, into: &sites)
+        case .localLet(let hint, let declaredType, let value, let rawBody):
+            collectCallSites(declaredType, targets: targets, into: &sites)
+            collectCallSites(value, targets: targets, into: &sites)
             collectCallSites(rawBody.instantiated(with: .variable(hint)), targets: targets, into: &sites)
         case .abstraction(let hint, let paramType, let rawBody):
             // Unlike `containsCall`/`containsBareRecursiveReference` (which only match

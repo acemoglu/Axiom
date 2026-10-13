@@ -178,6 +178,14 @@ public struct Unifier {
                 body: applyMetas(body, context: context, visited: &visited)
             )
 
+        case .localLet(let hint, let type, let value, let body):
+            return .rawLocalLet(
+                hint: hint,
+                type: applyMetas(type, context: context, visited: &visited),
+                value: applyMetas(value, context: context, visited: &visited),
+                body: applyMetas(body, context: context, visited: &visited)
+            )
+
         case .application(let function, let argument):
             return .application(
                 function: applyMetas(function, context: context, visited: &visited),

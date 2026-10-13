@@ -113,6 +113,35 @@ final class SoundnessTests: XCTestCase {
         }
     }
 
+    func testLetSubstitutesValueAndHasBodyType() throws {
+        let env = try natEnvironment()
+        let term = Term.localLet(
+            name: "x",
+            type: nat,
+            value: .variable("zero"),
+            body: Term.application(function: .variable("succ"), argument: .variable("x"))
+        )
+        XCTAssertEqual(
+            try term.reduced(),
+            Term.application(function: .variable("succ"), argument: .variable("zero"))
+        )
+        let inferred = try TypeChecker.typeCheck(term: term, declarations: env)
+        XCTAssertEqual(inferred, nat)
+    }
+
+    func testLetRejectsValueOfTheWrongType() throws {
+        let env = try natEnvironment()
+        let term = Term.localLet(
+            name: "x",
+            type: nat,
+            value: .universe(0),
+            body: .variable("x")
+        )
+        XCTAssertThrowsError(
+            try TypeChecker.typeCheck(term: term, declarations: env)
+        )
+    }
+
     // MARK: - Identity (ACCEPT / REJECT)
 
     func testIdentityHasPiType() throws {

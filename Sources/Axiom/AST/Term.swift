@@ -140,6 +140,10 @@ public struct Term: Equatable, Hashable, Sendable {
         /// *t u* — elimination for Π.
         case application(function: Term, argument: Term)
 
+        /// *let x : A := v in t*. `body` binds `x` by de Bruijn index. `type` and `value`
+        /// are outside that binder. Reduction substitutes `value` into `body`.
+        case localLet(hint: String, type: Term, value: Term, body: Term)
+
         /// **Inductive type declaration** (e.g. *Nat : Type₀*).
         ///
         /// - ``name``: the inductive type identifier (e.g. `"Nat"`).
@@ -203,6 +207,17 @@ extension Term {
         return rawAbstraction(hint: param, type: type, body: shiftedBody)
     }
 
+    /// Builds *let name : type := value in body*. `body` is named, like ``abstraction``.
+    public static func localLet(name: String, type: Term, value: Term, body: Term) -> Term {
+        if body.freeVariables.contains(name) {
+            return rawLocalLet(hint: name, type: type, value: value, body: body.abstracting(name))
+        }
+        let shiftedBody = TermArena.shared.maxBoundIndex(for: body.internID) >= 0
+            ? body.shifted(by: 1, cutoff: 0)
+            : body
+        return rawLocalLet(hint: name, type: type, value: value, body: shiftedBody)
+    }
+
     /// Builds a left-nested `λ h₀:T. λ h₁:T. …` chain in O(depth) without a final
     /// O(depth) name-abstraction sweep. `freeBody` is the innermost body before the
     /// innermost binder (typically a free reference to the variable that will become
@@ -258,6 +273,15 @@ extension Term {
         TermArena.shared.intern(TermKindStorage.abstraction(hint: hint, type: type.internID, body: body.internID))
     }
 
+    static func rawLocalLet(hint: String, type: Term, value: Term, body: Term) -> Term {
+        TermArena.shared.intern(TermKindStorage.localLet(
+            hint: hint,
+            type: type.internID,
+            value: value.internID,
+            body: body.internID
+        ))
+    }
+
     @inline(__always)
     static func child(_ id: Int32) -> Term {
         Term(internID: id)
@@ -301,6 +325,13 @@ extension Term {
             return TermArena.shared.intern(TermKindStorage.abstraction(
                 hint: hint,
                 type: Term.child(type).shifted(by: amount, cutoff: cutoff).internID,
+                body: Term.child(body).shifted(by: amount, cutoff: cutoff + 1).internID
+            ))
+        case .localLet(let hint, let type, let value, let body):
+            return TermArena.shared.intern(TermKindStorage.localLet(
+                hint: hint,
+                type: Term.child(type).shifted(by: amount, cutoff: cutoff).internID,
+                value: Term.child(value).shifted(by: amount, cutoff: cutoff).internID,
                 body: Term.child(body).shifted(by: amount, cutoff: cutoff + 1).internID
             ))
         case .inductive(let name, let type):
@@ -351,6 +382,13 @@ extension Term {
                 type: type.abstracting(name, depth: depth),
                 body: body.abstracting(name, depth: depth + 1)
             )
+        case .localLet(let hint, let type, let value, let body):
+            return .rawLocalLet(
+                hint: hint,
+                type: type.abstracting(name, depth: depth),
+                value: value.abstracting(name, depth: depth),
+                body: body.abstracting(name, depth: depth + 1)
+            )
         case .inductive(let inductiveName, let type):
             return .inductive(name: inductiveName, type: type.abstracting(name, depth: depth))
         case .constructor(let constructorName, let inductiveName, let type):
@@ -399,6 +437,13 @@ extension Term {
                 type: Term.child(type).substitutingBoundVariable(target, with: replacement).internID,
                 body: Term.child(body).substitutingBoundVariable(target + 1, with: replacement).internID
             ))
+        case .localLet(let hint, let type, let value, let body):
+            return TermArena.shared.intern(TermKindStorage.localLet(
+                hint: hint,
+                type: Term.child(type).substitutingBoundVariable(target, with: replacement).internID,
+                value: Term.child(value).substitutingBoundVariable(target, with: replacement).internID,
+                body: Term.child(body).substitutingBoundVariable(target + 1, with: replacement).internID
+            ))
         case .inductive(let name, let type):
             return TermArena.shared.intern(TermKindStorage.inductive(
                 name: name,
@@ -442,6 +487,10 @@ extension Term {
             return function.mentionsBoundVariable(index) || argument.mentionsBoundVariable(index)
         case .pi(_, let type, let body), .abstraction(_, let type, let body):
             return type.mentionsBoundVariable(index) || body.mentionsBoundVariable(index + 1)
+        case .localLet(_, let type, let value, let body):
+            return type.mentionsBoundVariable(index)
+                || value.mentionsBoundVariable(index)
+                || body.mentionsBoundVariable(index + 1)
         case .inductive(_, let type), .constructor(_, _, let type):
             return type.mentionsBoundVariable(index)
         case .match(let scrutinee, let motive, let cases):
@@ -504,6 +553,14 @@ extension Term {
                 body: body.substituting(name: name, with: replacement)
             )
 
+        case .localLet(let hint, let type, let value, let body):
+            return .rawLocalLet(
+                hint: hint,
+                type: type.substituting(name: name, with: replacement),
+                value: value.substituting(name: name, with: replacement),
+                body: body.substituting(name: name, with: replacement)
+            )
+
         case .inductive(let inductiveName, let type):
             return .inductive(
                 name: inductiveName,
@@ -563,6 +620,12 @@ extension Term {
                 type: try type.reduced(budget: &budget, unfolding: unfolding),
                 body: try body.reduced(budget: &budget, unfolding: unfolding)
             )
+
+        case .localLet(_, _, let value, let body):
+            let reducedValue = try value.reduced(budget: &budget, unfolding: unfolding)
+            return try body
+                .instantiated(with: reducedValue)
+                .reduced(budget: &budget, unfolding: unfolding)
 
         case .application(let function, let argument):
             let reducedFunction = try function.reduced(budget: &budget, unfolding: unfolding)

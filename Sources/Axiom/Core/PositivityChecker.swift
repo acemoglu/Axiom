@@ -79,7 +79,7 @@ public struct PositivityChecker {
                 throw PositivityError.negativeOccurrence(inductive: inductiveName, in: argument)
             }
 
-        case .abstraction, .match:
+        case .abstraction, .localLet, .match:
             throw PositivityError.negativeOccurrence(inductive: inductiveName, in: type)
 
         case .hole, .universe, .boundVariable:
@@ -107,6 +107,10 @@ public struct PositivityChecker {
             // both correct and avoids any risk of a local binder's display hint
             // coincidentally colliding with the inductive's own name.
             return occurs(inductiveName, in: domain) || occurs(inductiveName, in: body)
+        case .localLet(_, let declaredType, let value, let body):
+            return occurs(inductiveName, in: declaredType)
+                || occurs(inductiveName, in: value)
+                || occurs(inductiveName, in: body)
         case .match(let scrutinee, let motive, let cases):
             return occurs(inductiveName, in: scrutinee)
                 || occurs(inductiveName, in: motive)
@@ -165,6 +169,10 @@ public struct PositivityChecker {
         case .pi(_, let domain, let body),
              .abstraction(_, let domain, let body):
             try rejectForeignHoles(domain, inductiveName: inductiveName)
+            try rejectForeignHoles(body, inductiveName: inductiveName)
+        case .localLet(_, let declaredType, let value, let body):
+            try rejectForeignHoles(declaredType, inductiveName: inductiveName)
+            try rejectForeignHoles(value, inductiveName: inductiveName)
             try rejectForeignHoles(body, inductiveName: inductiveName)
         case .application(let function, let argument):
             try rejectForeignHoles(function, inductiveName: inductiveName)

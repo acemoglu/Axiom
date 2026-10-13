@@ -182,6 +182,21 @@ public struct TypeChecker {
             }
             return try typeCheckApplicationSpine(term: term, environment: environment)
 
+        case .localLet(let hint, let declaredType, let value, let rawBody):
+            var usedNames = Set(environment.keys)
+            let name = freshenBinderHint(hint, used: &usedNames)
+            if declaredType.freeMetavariables.isEmpty {
+                let domainSort = try typeCheck(term: declaredType, environment: environment)
+                _ = try expectUniverseLevel(of: declaredType, inferredType: domainSort)
+            }
+            let valueType = try typeCheck(term: value, environment: environment)
+            try ensureSubtype(expected: declaredType, actual: valueType)
+            let body = rawBody.instantiated(with: .variable(name))
+            var extended = environment
+            extended[name] = declaredType
+            let bodyType = try typeCheck(term: body, environment: extended, expectedType: nil)
+            return bodyType.substituting(name: name, with: value)
+
         case .match(let scrutinee, let motive, let cases):
             let scrutineeType = try typeCheck(
                 term: scrutinee,
@@ -412,6 +427,14 @@ public struct TypeChecker {
                 body: instantiateHoles(in: body, visited: &visited)
             )
 
+        case .localLet(let hint, let type, let value, let body):
+            return .rawLocalLet(
+                hint: hint,
+                type: instantiateHoles(in: type, visited: &visited),
+                value: instantiateHoles(in: value, visited: &visited),
+                body: instantiateHoles(in: body, visited: &visited)
+            )
+
         case .application(let function, let argument):
             return .application(
                 function: instantiateHoles(in: function, visited: &visited),
@@ -493,6 +516,13 @@ public struct TypeChecker {
             return .rawAbstraction(
                 hint: hint,
                 type: openDeBruijn(type, binderCount: binderCount, hints: hints, offset: offset),
+                body: openDeBruijn(body, binderCount: binderCount, hints: hints, offset: offset + 1)
+            )
+        case .localLet(let hint, let type, let value, let body):
+            return .rawLocalLet(
+                hint: hint,
+                type: openDeBruijn(type, binderCount: binderCount, hints: hints, offset: offset),
+                value: openDeBruijn(value, binderCount: binderCount, hints: hints, offset: offset),
                 body: openDeBruijn(body, binderCount: binderCount, hints: hints, offset: offset + 1)
             )
         case .inductive(let name, let type):
@@ -922,6 +952,10 @@ public struct TypeChecker {
             return unresolvedTermHoles(in: function).union(unresolvedTermHoles(in: argument))
         case .abstraction(_, _, let body):
             return unresolvedTermHoles(in: body)
+        case .localLet(_, let type, let value, let body):
+            return unresolvedTermHoles(in: type)
+                .union(unresolvedTermHoles(in: value))
+                .union(unresolvedTermHoles(in: body))
         case .pi(_, let domain, let body):
             return unresolvedTermHoles(in: domain).union(unresolvedTermHoles(in: body))
         case .match(let scrutinee, let motive, let cases):

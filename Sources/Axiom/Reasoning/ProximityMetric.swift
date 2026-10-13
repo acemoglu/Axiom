@@ -111,7 +111,7 @@ public enum ProximityMetric: Sendable {
     private static func kindFamilyBonus(_ left: Term.Kind, _ right: Term.Kind) -> Double {
         func family(_ kind: Term.Kind) -> Int {
             switch kind {
-            case .pi, .abstraction: return 1
+            case .pi, .abstraction, .localLet: return 1
             case .application: return 2
             case .universe: return 3
             case .variable, .boundVariable: return 4
