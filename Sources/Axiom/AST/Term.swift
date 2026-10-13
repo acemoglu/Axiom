@@ -420,6 +420,37 @@ extension Term {
             ))
         }
     }
+
+    /// `λ. (f #0)` contracts to `f` when `f` is independent of that binder.
+    func etaReduct() -> Term? {
+        guard case .abstraction(_, _, let body) = kind,
+              case .application(let function, let argument) = body.kind,
+              case .boundVariable(let index) = argument.kind,
+              index == 0
+        else { return nil }
+        if function.mentionsBoundVariable(0) { return nil }
+        return function.shifted(by: -1, cutoff: 1)
+    }
+
+    private func mentionsBoundVariable(_ index: Int) -> Bool {
+        switch kind {
+        case .boundVariable(let bound):
+            return bound == index
+        case .variable, .hole, .universe:
+            return false
+        case .application(let function, let argument):
+            return function.mentionsBoundVariable(index) || argument.mentionsBoundVariable(index)
+        case .pi(_, let type, let body), .abstraction(_, let type, let body):
+            return type.mentionsBoundVariable(index) || body.mentionsBoundVariable(index + 1)
+        case .inductive(_, let type), .constructor(_, _, let type):
+            return type.mentionsBoundVariable(index)
+        case .match(let scrutinee, let motive, let cases):
+            if scrutinee.mentionsBoundVariable(index) || motive.mentionsBoundVariable(index) {
+                return true
+            }
+            return cases.values.contains { $0.mentionsBoundVariable(index) }
+        }
+    }
 }
 
 // MARK: - Free variables and named (free-variable) substitution

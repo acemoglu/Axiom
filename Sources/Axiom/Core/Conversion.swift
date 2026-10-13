@@ -37,7 +37,7 @@ public struct Conversion {
     /// Compares terms that are already in the checker’s normal form. Skips a second
     /// normalization pass when the caller has already normalized both sides once.
     func areDefinitionallyEqualAssumingNormalized(_ left: Term, _ right: Term) -> Bool {
-        alphaEquivalent(left, right)
+        alphaEquivalent(etaShort(left), etaShort(right))
     }
 
     public func normalize(_ term: Term, unfolding: [String: Term] = [:]) throws -> Term {
@@ -91,5 +91,36 @@ public struct Conversion {
     /// terms therefore always share the same arena intern id.
     private func alphaEquivalent(_ t1: Term, _ t2: Term) -> Bool {
         t1 == t2
+    }
+
+    /// Contracts `λx. f x` to `f` wherever `x` is not free in `f`, including under binders.
+    private func etaShort(_ term: Term) -> Term {
+        if let reduct = term.etaReduct() {
+            return etaShort(reduct)
+        }
+        switch term.kind {
+        case .variable, .hole, .universe, .boundVariable:
+            return term
+        case .application(let function, let argument):
+            let rebuilt = Term.application(function: etaShort(function), argument: etaShort(argument))
+            if let reduct = rebuilt.etaReduct() { return etaShort(reduct) }
+            return rebuilt
+        case .abstraction(let hint, let type, let body):
+            let rebuilt = Term.rawAbstraction(hint: hint, type: etaShort(type), body: etaShort(body))
+            if let reduct = rebuilt.etaReduct() { return etaShort(reduct) }
+            return rebuilt
+        case .pi(let hint, let type, let body):
+            return .rawPi(hint: hint, type: etaShort(type), body: etaShort(body))
+        case .inductive(let name, let type):
+            return .inductive(name: name, type: etaShort(type))
+        case .constructor(let name, let inductiveName, let type):
+            return .constructor(name: name, inductiveName: inductiveName, type: etaShort(type))
+        case .match(let scrutinee, let motive, let cases):
+            return .match(
+                scrutinee: etaShort(scrutinee),
+                motive: etaShort(motive),
+                cases: cases.mapValues { etaShort($0) }
+            )
+        }
     }
 }

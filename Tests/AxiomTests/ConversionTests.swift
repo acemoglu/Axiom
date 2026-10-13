@@ -17,6 +17,31 @@ final class ConversionTests: XCTestCase {
         XCTAssertTrue(try conversion.areDefinitionallyEqual(applied, .universe(0)))
     }
 
+    /// η: λx. f x ≡ f when x is not free in f.
+    func testEtaEquatesLambdaOfApplicationWithFunction() throws {
+        let function = Term.variable("f")
+        let eta = Term.abstraction(
+            param: "x",
+            type: .universe(0),
+            body: Term.application(function: function, argument: .variable("x"))
+        )
+        let conversion = Conversion(strategy: .normalForm)
+        XCTAssertTrue(try conversion.areDefinitionallyEqual(eta, function))
+        XCTAssertTrue(try conversion.areDefinitionallyEqual(function, eta))
+    }
+
+    func testEtaDoesNotDropAFunctionThatUsesItsArgument() throws {
+        let appliedTwice = Term.abstraction(
+            param: "x",
+            type: .universe(0),
+            body: Term.application(
+                function: Term.application(function: .variable("g"), argument: .variable("x")),
+                argument: .variable("x")
+            )
+        )
+        XCTAssertFalse(try Conversion().areDefinitionallyEqual(appliedTwice, .variable("g")))
+    }
+
     func testFreshNameSkipsLegacyAndReservedPrefixes() {
         let used: Set<String> = ["$v0", "$m0", "$u0", "#0"]
         XCTAssertEqual(Term.freshName(avoiding: used), "#1")
