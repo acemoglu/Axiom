@@ -141,11 +141,13 @@ public struct TypeChecker {
             return .universe(level + 1)
 
         case .pi(let param, let domain, let rawCodomain):
-            let codomain = rawCodomain.instantiated(with: .variable(param))
+            var usedNames = Set(environment.keys)
+            let name = freshenBinderHint(param, used: &usedNames)
+            let codomain = rawCodomain.instantiated(with: .variable(name))
             let domainType = try typeCheck(term: domain, environment: environment)
             let i = try expectUniverseLevel(of: domain, inferredType: domainType)
             var extended = environment
-            extended[param] = domain
+            extended[name] = domain
             let codomainType = try typeCheck(term: codomain, environment: extended)
             let j = try expectUniverseLevel(of: codomain, inferredType: codomainType)
             return .universe(max(i, j))

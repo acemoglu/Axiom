@@ -555,6 +555,28 @@ final class SoundnessTests: XCTestCase {
         XCTAssertEqual(inferred, expected)
     }
 
+    /// Π(A : Type₀). Π(A : False). #1 — the codomain is the outer binder, a type.
+    /// Shadowing would look that binder up as False and reject a well-formed Π.
+    func testSameHintNestedPiPreservesOuterBinderSort() throws {
+        var env = try natEnvironment()
+        try env.add(Declaration(name: "False", kind: .inductive, type: .universe(0)))
+        try env.closeInductive("False")
+        let falseType = Term.variable("False")
+
+        let term = Term.rawPi(
+            hint: "A",
+            type: .universe(0),
+            body: Term.rawPi(
+                hint: "A",
+                type: falseType,
+                body: Term.rawBoundVariable(1)
+            )
+        )
+
+        let inferred = try TypeChecker.typeCheck(term: term, declarations: env)
+        XCTAssertEqual(inferred, .universe(1))
+    }
+
     // MARK: - Pi universe level (predicativity)
 
     /// Axiom's Π rule uses the sort of each component (Typeₙ : Typeₙ₊₁), so
