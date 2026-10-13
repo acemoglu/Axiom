@@ -1079,7 +1079,8 @@ public struct TypeChecker {
             constructorName: constructorName,
             expectedIndices: argumentInstantiation.indices,
             scrutineeIndices: scrutineeIndices,
-            environment: branchEnvironment
+            environment: branchEnvironment,
+            flexibleBinders: Set(branchLambdaParams.map(\.0))
         )
         let instance = constructorInstance(
             constructorName: constructorName,
@@ -1119,9 +1120,6 @@ public struct TypeChecker {
             )
         }
         var indices = constructorHead.indices
-        for (name, replacement) in binderSubstitutions {
-            indices = indices.map { $0.substituting(name: name, with: replacement) }
-        }
         var instantiatedParameters: [(String, Term)] = []
 
         if let arguments = try scrutineeConstructorArguments(
@@ -1129,6 +1127,8 @@ public struct TypeChecker {
             constructorName: constructorName,
             parameterCount: constructorParameters.count
         ) {
+            // Concrete arguments instantiate indices by constructor parameter name.
+            // Renaming to branch binders first would erase those names.
             var priorSubstitutions: [(String, Term)] = []
             for ((param, domain), argument) in zip(constructorParameters, arguments) {
                 let instantiatedDomain = instantiateConstructorParameterDomain(
@@ -1141,8 +1141,8 @@ public struct TypeChecker {
             }
         } else {
             instantiatedParameters = constructorParameters
-            for (param, _) in constructorParameters {
-                indices = indices.map { $0.substituting(name: param, with: .variable(param)) }
+            for (name, replacement) in binderSubstitutions {
+                indices = indices.map { $0.substituting(name: name, with: replacement) }
             }
         }
 
@@ -1168,7 +1168,8 @@ public struct TypeChecker {
         constructorName: String,
         expectedIndices: [Term],
         scrutineeIndices: [Term],
-        environment: [String: Term]
+        environment: [String: Term],
+        flexibleBinders: Set<String>
     ) throws {
         guard expectedIndices.count == scrutineeIndices.count else {
             let expected = expectedIndices.first ?? .universe(0)
@@ -1186,14 +1187,45 @@ public struct TypeChecker {
                     actual: actualIndex,
                     environment: environment
                 )
-            } catch let TypeError.typeMismatch(expected: expected, actual: actual) {
-                throw TypeError.indexMismatch(
-                    constructor: constructorName,
-                    expected: expected,
-                    actual: actual
-                )
+            } catch let TypeError.typeMismatch {
+                guard indicesRefine(
+                    expected: expectedIndex,
+                    actual: actualIndex,
+                    flexibles: flexibleBinders
+                ) else {
+                    throw TypeError.indexMismatch(
+                        constructor: constructorName,
+                        expected: expectedIndex,
+                        actual: actualIndex
+                    )
+                }
             }
         }
+    }
+
+    /// Branch binders in a return index are refinable. `succ #0` matches `succ k`
+    /// by solving `#0 := k`; a rigid mismatch such as `zero` against `succ k` does not.
+    private mutating func indicesRefine(expected: Term, actual: Term, flexibles: Set<String>) -> Bool {
+        var flexibleExpected = expected
+        var introduced: Set<String> = []
+        for name in flexibles where flexibleExpected.freeVariables.contains(name) {
+            let hole = "index-\(name)"
+            introduced.insert(hole)
+            flexibleExpected = flexibleExpected.substituting(name: name, with: .hole(hole))
+        }
+        guard !introduced.isEmpty else { return false }
+        var context: [String: Term] = [:]
+        do {
+            try Unifier.unify(
+                flexibleExpected,
+                actual,
+                unfolding: conversionUnfolding(),
+                context: &context
+            )
+        } catch {
+            return false
+        }
+        return context.keys.allSatisfy { introduced.contains($0) }
     }
 
     /// Peels a λ-telescope, freshening binder hints that collide with `environment` or

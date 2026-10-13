@@ -618,6 +618,128 @@ final class InductiveTypesTests: XCTestCase {
         XCTAssertTrue(try Conversion().areDefinitionallyEqual(inferred, witness))
     }
 
+    /// Branch binders need not reuse constructor parameter names. The concrete
+    /// scrutinee argument (`zero`) must still instantiate the return index.
+    func testConcreteVConsMatchAcceptsRenamedBranchBinders() throws {
+        let vecType = Term.pi(param: "n", type: nat, body: Term.universe(0))
+        var env = try natEnvironment()
+        try env.add(Declaration(name: "Vec", kind: .constant, type: vecType))
+
+        let vecN = Term.application(function: .variable("Vec"), argument: .variable("n"))
+        let vecZero = Term.application(function: .variable("Vec"), argument: .variable("zero"))
+        let vecSuccN = Term.application(
+            function: .variable("Vec"),
+            argument: Term.application(function: .variable("succ"), argument: .variable("n"))
+        )
+        let vconsType = Term.pi(
+            param: "n",
+            type: nat,
+            body: Term.pi(
+                param: "h",
+                type: nat,
+                body: Term.pi(param: "t", type: vecN, body: vecSuccN)
+            )
+        )
+        try env.add(Declaration(name: "vcons", kind: .constructor, type: vconsType))
+        try env.closeInductive("Vec")
+
+        let h = Term.variable("h")
+        let t = Term.variable("t")
+        let witness = Term.variable("w")
+        let vecSuccZero = Term.application(
+            function: .variable("Vec"),
+            argument: Term.application(function: .variable("succ"), argument: .variable("zero"))
+        )
+        let scrutinee = Term.application(
+            function: Term.application(
+                function: Term.application(function: .variable("vcons"), argument: .variable("zero")),
+                argument: h
+            ),
+            argument: t
+        )
+        let matchTerm = Term.match(
+            scrutinee: scrutinee,
+            motive: Term.constantMotive(scrutineeType: vecSuccZero, returnType: witness),
+            cases: [
+                "vcons": Term.abstraction(
+                    param: "m",
+                    type: nat,
+                    body: Term.abstraction(
+                        param: "x",
+                        type: nat,
+                        body: Term.abstraction(param: "ys", type: vecZero, body: witness)
+                    )
+                ),
+            ]
+        )
+
+        let inferred = try TypeChecker.typeCheck(
+            term: matchTerm,
+            declarations: env,
+            environment: [
+                "Vec": vecType,
+                "zero": nat,
+                "succ": succType,
+                "vcons": vconsType,
+                "h": nat,
+                "t": vecZero,
+                "w": Term.universe(0),
+            ]
+        )
+        XCTAssertTrue(try Conversion().areDefinitionallyEqual(inferred, witness))
+    }
+
+    /// `k` is already in scope, so the branch binder is freshened. The return index
+    /// `succ n` must still refine to the scrutinee index `succ k`.
+    func testVariableScrutineeRefinesFreshenedIndexBinder() throws {
+        let family = Term.pi(param: "n", type: nat, body: .universe(0))
+        var env = try natEnvironment()
+        try env.add(Declaration(name: "SVec", kind: .constant, type: family))
+        let sconsType = Term.pi(
+            param: "n",
+            type: nat,
+            body: Term.pi(
+                param: "h",
+                type: nat,
+                body: Term.application(
+                    function: .variable("SVec"),
+                    argument: Term.application(function: .variable("succ"), argument: .variable("n"))
+                )
+            )
+        )
+        try env.add(Declaration(name: "scons", kind: .constructor, type: sconsType))
+        try env.closeInductive("SVec")
+
+        let vecSuccK = Term.application(
+            function: .variable("SVec"),
+            argument: Term.application(function: .variable("succ"), argument: .variable("k"))
+        )
+        let matchTerm = Term.match(
+            scrutinee: .variable("xs"),
+            motive: Term.constantMotive(scrutineeType: vecSuccK, returnType: nat),
+            cases: [
+                "scons": Term.abstraction(
+                    param: "k",
+                    type: nat,
+                    body: Term.abstraction(param: "h", type: nat, body: .variable("zero"))
+                ),
+            ]
+        )
+
+        let inferred = try TypeChecker.typeCheck(
+            term: matchTerm,
+            declarations: env,
+            environment: [
+                "SVec": family,
+                "zero": nat,
+                "succ": succType,
+                "k": nat,
+                "xs": vecSuccK,
+            ]
+        )
+        XCTAssertTrue(try Conversion().areDefinitionallyEqual(inferred, nat))
+    }
+
     func testMatchRejectsIndexedBranchIndexMismatch() throws {
         let vecType = Term.pi(param: "n", type: nat, body: Term.universe(0))
         var env = try natEnvironment()
