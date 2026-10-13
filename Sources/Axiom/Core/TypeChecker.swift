@@ -576,8 +576,8 @@ public struct TypeChecker {
         return try normalizeForChecking(term)
     }
 
-    /// Expected type may be a higher universe than the inferred type.
-    /// `Typeᵢ ≤ Typeⱼ` when `i ≤ j`. This is not definitional equality.
+    /// Expected type may be a higher universe than the inferred type, including
+    /// under a Π codomain. This is not definitional equality.
     private mutating func ensureSubtype(
         expected: Term,
         actual: Term,
@@ -590,15 +590,35 @@ public struct TypeChecker {
                 try ensureConvertible(expected: expected, actual: actual)
             }
         } catch let TypeError.typeMismatch {
-            let subtype = try normalizedForComparison(actual)
-            let supertype = try normalizedForComparison(expected)
-            guard case .universe(let lower) = subtype.kind,
-                  case .universe(let upper) = supertype.kind,
-                  lower <= upper
-            else {
+            let accepted = try cumulativelySubsumes(subtype: actual, supertype: expected)
+            guard accepted else {
                 throw TypeError.typeMismatch(expected: expected, actual: actual)
             }
         }
+    }
+
+    /// `Typeᵢ ≤ Typeⱼ` for `i ≤ j`, lifted through Π on the codomain only.
+    /// Domains must be convertible. This is not definitional equality.
+    private mutating func cumulativelySubsumes(subtype: Term, supertype: Term) throws -> Bool {
+        let lower = try normalizedForComparison(subtype)
+        let upper = try normalizedForComparison(supertype)
+        if lower == upper { return true }
+        if conversion.areDefinitionallyEqualAssumingNormalized(lower, upper) { return true }
+        if case .universe(let i) = lower.kind, case .universe(let j) = upper.kind {
+            return i <= j
+        }
+        guard case .pi(_, let domain, let body) = lower.kind,
+              case .pi(_, let expectedDomain, let expectedBody) = upper.kind
+        else { return false }
+        let normalizedDomain = try normalizedForComparison(domain)
+        let normalizedExpectedDomain = try normalizedForComparison(expectedDomain)
+        let domainsMatch = normalizedDomain == normalizedExpectedDomain
+            || conversion.areDefinitionallyEqualAssumingNormalized(
+                normalizedDomain,
+                normalizedExpectedDomain
+            )
+        guard domainsMatch else { return false }
+        return try cumulativelySubsumes(subtype: body, supertype: expectedBody)
     }
 
     /// Definitional equality only — no metavariable solving (trusted checking).

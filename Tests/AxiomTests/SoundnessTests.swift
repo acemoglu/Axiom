@@ -78,6 +78,41 @@ final class SoundnessTests: XCTestCase {
         }
     }
 
+    /// Π(x : A). Type₀ is accepted where Π(x : A). Type₁ is expected.
+    /// A different domain is not.
+    func testPiCumulativityRaisesCodomainOnly() throws {
+        let domain = Term.variable("A")
+        let term = Term.abstraction(param: "x", type: domain, body: .variable("B"))
+        let sameDomain = Term.pi(param: "x", type: domain, body: .universe(1))
+        var checker = TypeChecker()
+        XCTAssertNoThrow(
+            try checker.checkTermMatchesType(
+                term,
+                expected: sameDomain,
+                environment: ["A": .universe(0), "B": .universe(0)]
+            )
+        )
+        XCTAssertFalse(
+            try Conversion().areDefinitionallyEqual(
+                Term.pi(param: "x", type: domain, body: .universe(0)),
+                sameDomain
+            )
+        )
+
+        let widerDomain = Term.pi(param: "x", type: .universe(1), body: .universe(1))
+        XCTAssertThrowsError(
+            try checker.checkTermMatchesType(
+                term,
+                expected: widerDomain,
+                environment: ["A": .universe(0), "B": .universe(0)]
+            )
+        ) { error in
+            guard case .typeMismatch = error as? TypeError else {
+                return XCTFail("Expected typeMismatch, got \(error)")
+            }
+        }
+    }
+
     // MARK: - Identity (ACCEPT / REJECT)
 
     func testIdentityHasPiType() throws {
