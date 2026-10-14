@@ -148,11 +148,18 @@ public struct TypeChecker {
             let name = freshenBinderHint(param, used: &usedNames)
             let codomain = rawCodomain.instantiated(with: .variable(name))
             let domainType = try typeCheck(term: domain, environment: environment)
-            let i = try expectUniverseLevel(of: domain, inferredType: domainType)
+            try expectDomainSort(of: domain, inferredType: domainType)
             var extended = environment
             extended[name] = domain
             let codomainType = try typeCheck(term: codomain, environment: extended)
+            if case .prop = codomainType.kind {
+                return .prop
+            }
             let j = try expectUniverseLevel(of: codomain, inferredType: codomainType)
+            if case .prop = domainType.kind {
+                return .universe(j)
+            }
+            let i = try expectUniverseLevel(of: domain, inferredType: domainType)
             return .universe(max(i, j))
 
         case .abstraction(let param, let paramType, let rawBody):
@@ -165,7 +172,7 @@ public struct TypeChecker {
             let resolvedParamType = resolvePatternType(paramType, name: name, environment: environment)
             if resolvedParamType.freeMetavariables.isEmpty {
                 let domainSort = try typeCheck(term: resolvedParamType, environment: environment)
-                _ = try expectUniverseLevel(of: resolvedParamType, inferredType: domainSort)
+                try expectDomainSort(of: resolvedParamType, inferredType: domainSort)
             }
             var extended = environment
             extended[name] = resolvedParamType
@@ -480,7 +487,7 @@ public struct TypeChecker {
             let resolvedType = resolvePatternType(paramType, name: name, environment: extended)
             if resolvedType.freeMetavariables.isEmpty {
                 let domainSort = try typeCheck(term: resolvedType, environment: extended)
-                _ = try expectUniverseLevel(of: resolvedType, inferredType: domainSort)
+                try expectDomainSort(of: resolvedType, inferredType: domainSort)
             }
             params.append((name, resolvedType))
             extended[name] = resolvedType
@@ -734,6 +741,12 @@ public struct TypeChecker {
             throw TypeError.expectedUniverse(term, inferredType)
         }
         return level
+    }
+
+    /// A Π or λ domain is a type when it inhabits `Typeᵢ` or `Prop`.
+    private func expectDomainSort(of term: Term, inferredType: Term) throws {
+        if case .prop = inferredType.kind { return }
+        _ = try expectUniverseLevel(of: term, inferredType: inferredType)
     }
 
     private mutating func eliminationTarget(of type: Term) throws -> (name: String, indices: [Term])? {

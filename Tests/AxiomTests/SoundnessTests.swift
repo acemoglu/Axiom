@@ -84,6 +84,67 @@ final class SoundnessTests: XCTestCase {
         XCTAssertEqual(try TypeChecker.typeCheck(term: overProp), .universe(1))
     }
 
+    /// A product whose codomain inhabits Prop inhabits Prop.
+    /// Π(A : Type₀). Prop stays Type₁, because Prop itself inhabits Type₁.
+    func testProductIntoPropIsProp() throws {
+        let env = try natEnvironment()
+        let quantified = Term.pi(param: "A", type: .universe(0), body: .variable("Q"))
+        XCTAssertEqual(
+            try TypeChecker.typeCheck(
+                term: quantified,
+                declarations: env,
+                environment: ["Q": .prop]
+            ),
+            .prop
+        )
+        let higher = Term.pi(param: "A", type: .universe(1), body: .variable("Q"))
+        XCTAssertEqual(
+            try TypeChecker.typeCheck(term: higher, environment: ["Q": .prop]),
+            .prop
+        )
+        let nested = Term.pi(
+            param: "A",
+            type: .universe(0),
+            body: Term.pi(param: "x", type: .variable("A"), body: .variable("Q"))
+        )
+        XCTAssertEqual(
+            try TypeChecker.typeCheck(term: nested, environment: ["Q": .prop]),
+            .prop
+        )
+        let implication = Term.pi(param: "h", type: .variable("Q"), body: .variable("Q"))
+        XCTAssertEqual(
+            try TypeChecker.typeCheck(term: implication, environment: ["Q": .prop]),
+            .prop
+        )
+        let intoNat = Term.pi(param: "h", type: .variable("Q"), body: nat)
+        XCTAssertEqual(
+            try TypeChecker.typeCheck(
+                term: intoNat,
+                declarations: env,
+                environment: ["Q": .prop]
+            ),
+            .universe(0)
+        )
+        let sortCodomain = Term.pi(param: "A", type: .universe(0), body: .prop)
+        XCTAssertEqual(try TypeChecker.typeCheck(term: sortCodomain), .universe(1))
+
+        let proof = Term.abstraction(param: "A", type: .universe(0), body: .variable("q"))
+        let proofType = try TypeChecker.typeCheck(
+            term: proof,
+            environment: ["Q": .prop, "q": .variable("Q")]
+        )
+        XCTAssertEqual(proofType, quantified)
+        let applied = Term.application(function: proof, argument: nat)
+        XCTAssertEqual(
+            try TypeChecker.typeCheck(
+                term: applied,
+                declarations: env,
+                environment: ["Q": .prop, "q": .variable("Q")]
+            ),
+            .variable("Q")
+        )
+    }
+
     /// A term of type Type₀ is accepted where Type₁ is expected. The sorts stay apart.
     func testLowerUniverseIsAcceptedWhereHigherUniverseIsExpected() throws {
         var checker = TypeChecker()
