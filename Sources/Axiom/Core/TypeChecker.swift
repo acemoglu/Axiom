@@ -137,6 +137,9 @@ public struct TypeChecker {
             }
             return .hole(name)
 
+        case .prop:
+            return .universe(1)
+
         case .universe(let level):
             return .universe(level + 1)
 
@@ -410,7 +413,7 @@ public struct TypeChecker {
             defer { visited.remove(name) }
             return instantiateHoles(in: solution, visited: &visited)
 
-        case .variable, .boundVariable, .universe:
+        case .variable, .boundVariable, .universe, .prop:
             return term
 
         case .pi(let hint, let type, let body):
@@ -499,7 +502,7 @@ public struct TypeChecker {
             let relative = index - offset
             guard relative >= 0, relative < binderCount else { return term }
             return .variable(hints[binderCount - 1 - relative])
-        case .variable, .hole, .universe:
+        case .variable, .hole, .universe, .prop:
             return term
         case .application(let function, let argument):
             return .application(
@@ -946,7 +949,7 @@ public struct TypeChecker {
         switch term.kind {
         case .hole(let name):
             return [name]
-        case .variable, .boundVariable, .universe:
+        case .variable, .boundVariable, .universe, .prop:
             return []
         case .application(let function, let argument):
             return unresolvedTermHoles(in: function).union(unresolvedTermHoles(in: argument))

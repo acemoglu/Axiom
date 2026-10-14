@@ -98,7 +98,7 @@ final class TermArena: @unchecked Sendable {
         switch kind {
         case .variable(let name):
             return [name]
-        case .boundVariable, .hole, .universe:
+        case .boundVariable, .hole, .universe, .prop:
             return []
         case .pi(_, let type, let body), .abstraction(_, let type, let body):
             return storage[Int(type)].freeVariables.union(storage[Int(body)].freeVariables)
@@ -125,7 +125,7 @@ final class TermArena: @unchecked Sendable {
         switch kind {
         case .hole(let name):
             return [name]
-        case .variable, .boundVariable, .universe:
+        case .variable, .boundVariable, .universe, .prop:
             return []
         case .pi(_, let type, let body), .abstraction(_, let type, let body):
             return storage[Int(type)].freeMetavariables.union(storage[Int(body)].freeMetavariables)
@@ -150,7 +150,7 @@ final class TermArena: @unchecked Sendable {
 
     private func computeContainsMatch(_ kind: TermKindStorage) -> Bool {
         switch kind {
-        case .variable, .boundVariable, .hole, .universe:
+        case .variable, .boundVariable, .hole, .universe, .prop:
             return false
         case .pi(_, let type, let body), .abstraction(_, let type, let body):
             return storage[Int(type)].containsMatch || storage[Int(body)].containsMatch
@@ -173,7 +173,7 @@ final class TermArena: @unchecked Sendable {
         switch kind {
         case .boundVariable:
             return true
-        case .variable, .hole, .universe:
+        case .variable, .hole, .universe, .prop:
             return false
         case .pi(_, let type, let body), .abstraction(_, let type, let body):
             return storage[Int(type)].hasBoundVariables || storage[Int(body)].hasBoundVariables
@@ -198,7 +198,7 @@ final class TermArena: @unchecked Sendable {
         switch kind {
         case .boundVariable(let index):
             return index
-        case .variable, .hole, .universe:
+        case .variable, .hole, .universe, .prop:
             return -1
         case .pi(_, let type, let body), .abstraction(_, let type, let body):
             let inType = storage[Int(type)].maxBoundIndex
@@ -248,6 +248,7 @@ enum TermKindStorage {
     case boundVariable(Int)
     case hole(String)
     case universe(Int)
+    case prop
     case pi(hint: String, type: Int32, body: Int32)
     case abstraction(hint: String, type: Int32, body: Int32)
     case application(function: Int32, argument: Int32)
@@ -266,6 +267,8 @@ enum TermKindStorage {
             self = .hole(name)
         case .universe(let level):
             self = .universe(level)
+        case .prop:
+            self = .prop
         case .pi(let hint, let type, let body):
             self = .pi(hint: hint, type: type.internID, body: body.internID)
         case .abstraction(let hint, let type, let body):
@@ -302,6 +305,8 @@ enum TermKindStorage {
             return .hole(name)
         case .universe(let level):
             return .universe(level)
+        case .prop:
+            return .prop
         case .pi(let hint, let type, let body):
             return .pi(hint: hint, type: Term(internID: type), body: Term(internID: body))
         case .abstraction(let hint, let type, let body):
@@ -358,6 +363,8 @@ extension TermKindStorage {
             return l == r
         case (.universe(let l), .universe(let r)):
             return l == r
+        case (.prop, .prop):
+            return true
         case (.pi(_, let lt, let lb), .pi(_, let rt, let rb)):
             return lt == rt && lb == rb
         case (.abstraction(_, let lt, let lb), .abstraction(_, let rt, let rb)):
@@ -395,6 +402,8 @@ extension TermKindStorage {
         case .universe(let level):
             hasher.combine(2)
             hasher.combine(level)
+        case .prop:
+            hasher.combine(11)
         case .pi(_, let type, let body):
             hasher.combine(3)
             hasher.combine(type)

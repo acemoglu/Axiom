@@ -113,7 +113,7 @@ public enum ProximityMetric: Sendable {
             switch kind {
             case .pi, .abstraction, .localLet: return 1
             case .application: return 2
-            case .universe: return 3
+            case .universe, .prop: return 3
             case .variable, .boundVariable: return 4
             case .hole: return 5
             case .inductive, .constructor: return 6

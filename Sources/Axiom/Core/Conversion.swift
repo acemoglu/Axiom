@@ -106,7 +106,7 @@ public struct Conversion {
             return etaShort(reduct)
         }
         switch term.kind {
-        case .variable, .hole, .universe, .boundVariable:
+        case .variable, .hole, .universe, .boundVariable, .prop:
             return term
         case .application(let function, let argument):
             let rebuilt = Term.application(function: etaShort(function), argument: etaShort(argument))

@@ -162,7 +162,7 @@ public struct TerminationChecker {
             collectCalleeNames(in: body, among: names, into: &callees)
         case .inductive(_, let type), .constructor(_, _, let type):
             collectCalleeNames(in: type, among: names, into: &callees)
-        case .hole, .universe, .variable, .boundVariable:
+        case .hole, .universe, .variable, .boundVariable, .prop:
             break
         }
     }
@@ -273,7 +273,7 @@ public struct TerminationChecker {
             return containsCall(to: targets, in: domain) || containsCall(to: targets, in: body)
         case .inductive(_, let type), .constructor(_, _, let type):
             return containsCall(to: targets, in: type)
-        case .hole, .universe, .boundVariable:
+        case .hole, .universe, .boundVariable, .prop:
             return false
         }
     }
@@ -302,7 +302,7 @@ public struct TerminationChecker {
                 || containsBareRecursiveReference(in: body, targets: targets)
         case .inductive(_, let type), .constructor(_, _, let type):
             return containsBareRecursiveReference(in: type, targets: targets)
-        case .hole, .universe, .boundVariable:
+        case .hole, .universe, .boundVariable, .prop:
             return false
         }
     }
@@ -361,7 +361,7 @@ public struct TerminationChecker {
             for branch in cases.values {
                 collectCallSites(branch, targets: targets, into: &sites)
             }
-        case .hole, .universe, .variable, .boundVariable, .inductive, .constructor:
+        case .hole, .universe, .variable, .boundVariable, .inductive, .constructor, .prop:
             break
         }
     }

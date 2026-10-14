@@ -7,7 +7,7 @@ enum ReasoningTermRewrite {
         case .hole(let holeName):
             return holeName == name ? replacement : term
 
-        case .variable, .boundVariable, .universe:
+        case .variable, .boundVariable, .universe, .prop:
             return term
 
         case .application(let function, let argument):

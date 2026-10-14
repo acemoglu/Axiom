@@ -161,7 +161,7 @@ public struct Unifier {
             defer { visited.remove(meta) }
             return applyMetas(solution, context: context, visited: &visited)
 
-        case .variable, .boundVariable, .universe:
+        case .variable, .boundVariable, .universe, .prop:
             return term
 
         case .pi(let hint, let type, let body):

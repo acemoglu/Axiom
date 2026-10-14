@@ -82,7 +82,7 @@ public struct PositivityChecker {
         case .abstraction, .localLet, .match:
             throw PositivityError.negativeOccurrence(inductive: inductiveName, in: type)
 
-        case .hole, .universe, .boundVariable:
+        case .hole, .universe, .boundVariable, .prop:
             return
         }
     }
@@ -95,7 +95,7 @@ public struct PositivityChecker {
             return true
         }
         switch term.kind {
-        case .variable, .boundVariable, .inductive, .constructor, .universe, .hole:
+        case .variable, .boundVariable, .inductive, .constructor, .universe, .hole, .prop:
             return false
         case .application(let function, let argument):
             return occurs(inductiveName, in: function) || occurs(inductiveName, in: argument)
@@ -164,7 +164,7 @@ public struct PositivityChecker {
         switch term.kind {
         case .hole(let name):
             throw PositivityError.unresolvedHole(name, inductive: inductiveName, in: term)
-        case .variable, .boundVariable, .universe:
+        case .variable, .boundVariable, .universe, .prop:
             return
         case .pi(_, let domain, let body),
              .abstraction(_, let domain, let body):

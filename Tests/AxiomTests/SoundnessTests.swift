@@ -53,6 +53,37 @@ final class SoundnessTests: XCTestCase {
         }
     }
 
+    func testPropInhabitsTypeOne() throws {
+        XCTAssertEqual(try TypeChecker.typeCheck(term: .prop), .universe(1))
+        XCTAssertFalse(try Conversion().areDefinitionallyEqual(.prop, .universe(0)))
+        XCTAssertFalse(try Conversion().areDefinitionallyEqual(.prop, .universe(1)))
+    }
+
+    func testPropIsAcceptedAtTypeOneAndRejectedAtTypeZero() {
+        var checker = TypeChecker()
+        XCTAssertNoThrow(try checker.checkTermMatchesType(.prop, expected: .universe(1)))
+        XCTAssertNoThrow(try checker.checkTermMatchesType(.prop, expected: .universe(2)))
+        XCTAssertThrowsError(
+            try checker.checkTermMatchesType(.prop, expected: .universe(0))
+        ) { error in
+            guard case .typeMismatch = error as? TypeError else {
+                return XCTFail("Expected typeMismatch, got \(error)")
+            }
+        }
+    }
+
+    /// Quantifying over Prop still uses `max`. Π(p : Prop). Nat : Type₁, and
+    /// Π(p : Prop). Prop : Type₁.
+    func testPiOverPropUsesThePredicativeRule() throws {
+        let overNat = Term.pi(param: "p", type: .prop, body: nat)
+        XCTAssertEqual(
+            try TypeChecker.typeCheck(term: overNat, declarations: try natEnvironment()),
+            .universe(1)
+        )
+        let overProp = Term.pi(param: "p", type: .prop, body: .prop)
+        XCTAssertEqual(try TypeChecker.typeCheck(term: overProp), .universe(1))
+    }
+
     /// A term of type Type₀ is accepted where Type₁ is expected. The sorts stay apart.
     func testLowerUniverseIsAcceptedWhereHigherUniverseIsExpected() throws {
         var checker = TypeChecker()

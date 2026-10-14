@@ -127,6 +127,9 @@ public struct Term: Equatable, Hashable, Sendable {
         /// *Type_i* — predicative universe.
         case universe(Int)
 
+        /// *Prop*, the sort of propositions. Its type is *Type₁*.
+        case prop
+
         /// *Π(x:A). B* — dependent function type.
         ///
         /// `hint` is the surface name shown when this binder is opened; it is **not**
@@ -186,6 +189,11 @@ extension Term {
 
     public static func universe(_ level: Int) -> Term {
         TermPool.shared.intern(.universe(level))
+    }
+
+    /// *Prop*. Its type is *Type₁*.
+    public static var prop: Term {
+        TermPool.shared.intern(.prop)
     }
 
     /// Builds *Π(param:type). body*. `body` is given **named** — written using ordinary
@@ -308,7 +316,7 @@ extension Term {
         switch TermArena.shared.storage(for: internID) {
         case .boundVariable(let index):
             return index >= cutoff ? .rawBoundVariable(index + amount) : self
-        case .variable, .hole, .universe:
+        case .variable, .hole, .universe, .prop:
             return self
         case .application(let function, let argument):
             return TermArena.shared.intern(TermKindStorage.application(
@@ -363,7 +371,7 @@ extension Term {
         switch kind {
         case .variable(let variableName):
             return variableName == name ? .rawBoundVariable(depth) : self
-        case .boundVariable, .hole, .universe:
+        case .boundVariable, .hole, .universe, .prop:
             return self
         case .application(let function, let argument):
             return .application(
@@ -418,7 +426,7 @@ extension Term {
         case .boundVariable(let index):
             if index == target { return replacement.shifted(by: target) }
             return index > target ? .rawBoundVariable(index - 1) : self
-        case .variable, .hole, .universe:
+        case .variable, .hole, .universe, .prop:
             return self
         case .application(let function, let argument):
             return TermArena.shared.intern(TermKindStorage.application(
@@ -481,7 +489,7 @@ extension Term {
         switch kind {
         case .boundVariable(let bound):
             return bound == index
-        case .variable, .hole, .universe:
+        case .variable, .hole, .universe, .prop:
             return false
         case .application(let function, let argument):
             return function.mentionsBoundVariable(index) || argument.mentionsBoundVariable(index)
@@ -530,7 +538,7 @@ extension Term {
         case .variable(let variableName):
             return variableName == name ? replacement : self
 
-        case .boundVariable, .hole, .universe:
+        case .boundVariable, .hole, .universe, .prop:
             return self
 
         case .application(let function, let argument):
@@ -604,7 +612,7 @@ extension Term {
             return try value.reduced(budget: &budget, unfolding: unfolding)
         }
         switch kind {
-        case .variable, .universe, .hole, .boundVariable:
+        case .variable, .universe, .hole, .boundVariable, .prop:
             return self
 
         case .pi(let hint, let type, let body):
