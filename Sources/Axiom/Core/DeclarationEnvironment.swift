@@ -54,7 +54,7 @@ public enum DeclarationEnvironmentError: Error, Equatable, Sendable {
     case inductiveAlreadyClosed(String)
     /// Parent inductive must be registered before its constructors.
     case missingInductiveDeclaration(String)
-    /// Inductive sort must be a concrete ``Term/universe``.
+    /// Inductive sort must be `Typeᵢ` or `Prop`.
     case invalidInductiveSort(String, Term)
     /// Declarations with values must be registered through ``TypeChecker/checkDeclaration``.
     case requiresTypeChecker(String)
@@ -126,7 +126,7 @@ public struct DeclarationEnvironment: Equatable, Sendable {
         guard let inductiveName = inductiveName(inConstructorType: constructorType) else {
             throw DeclarationEnvironmentError.invalidConstructorCodomain(constructorType)
         }
-        guard let inductiveLevel = inductiveLevel(for: inductiveName) else {
+        guard let sort = inductiveSort(for: inductiveName) else {
             if declarationsByName[inductiveName] == nil {
                 throw DeclarationEnvironmentError.missingInductiveDeclaration(inductiveName)
             }
@@ -139,23 +139,22 @@ public struct DeclarationEnvironment: Equatable, Sendable {
             inductiveName: inductiveName,
             constructorTypes: [constructorType]
         )
-        try UniverseChecker().checkConstructorType(
-            constructorType,
-            inductiveName: inductiveName,
-            inductiveLevel: inductiveLevel
-        )
+        if case .type(let inductiveLevel) = sort {
+            try UniverseChecker().checkConstructorType(
+                constructorType,
+                inductiveName: inductiveName,
+                inductiveLevel: inductiveLevel
+            )
+        }
     }
 
-    private func inductiveLevel(for inductiveName: String) -> Int? {
+    private func inductiveSort(for inductiveName: String) -> InductiveFamily.FamilySort? {
         guard let declaration = declarationsByName[inductiveName] else {
             return nil
         }
         switch declaration.kind {
-        case .inductive:
-            guard case .universe(let level) = declaration.type.kind else { return nil }
-            return level
-        case .definition, .constant, .theorem:
-            return InductiveFamily.familyUniverseLevel(declaration.type)
+        case .inductive, .definition, .constant, .theorem:
+            return InductiveFamily.familySort(declaration.type)
         case .axiom, .constructor:
             return nil
         }
@@ -231,7 +230,7 @@ public struct DeclarationEnvironment: Equatable, Sendable {
                   isEliminableFamily(declaration) else {
                 throw DeclarationEnvironmentError.unknownInductive(inductiveName)
             }
-            guard inductiveLevel(for: inductiveName) != nil else {
+            guard inductiveSort(for: inductiveName) != nil else {
                 throw DeclarationEnvironmentError.invalidInductiveSort(
                     inductiveName,
                     declarationsByName[inductiveName]!.type
@@ -256,12 +255,13 @@ public struct DeclarationEnvironment: Equatable, Sendable {
         )
 
         for inductiveName in mutualBlock.sorted() {
-            guard let inductiveLevel = inductiveLevel(for: inductiveName) else {
+            guard let sort = inductiveSort(for: inductiveName) else {
                 throw DeclarationEnvironmentError.invalidInductiveSort(
                     inductiveName,
                     declarationsByName[inductiveName]!.type
                 )
             }
+            guard case .type(let inductiveLevel) = sort else { continue }
             for constructorType in constructors(for: inductiveName).map(\.type) {
                 try UniverseChecker().checkConstructorType(
                     constructorType,

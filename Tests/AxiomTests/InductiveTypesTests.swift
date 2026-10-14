@@ -1008,4 +1008,70 @@ final class InductiveTypesTests: XCTestCase {
             )
         }
     }
+
+    func testMatchOnPropInductiveRejectsTypeMotive() throws {
+        var env = DeclarationEnvironment()
+        let box = Term.variable("Box")
+        try env.add(Declaration(name: "Box", kind: .inductive, type: .prop))
+        try env.add(Declaration(name: "here", kind: .constructor, type: box))
+        try env.closeInductive("Box")
+
+        let motive = Term.constantMotive(scrutineeType: box, returnType: .universe(0))
+        let term = Term.match(
+            scrutinee: .variable("b"),
+            motive: motive,
+            cases: ["here": .universe(0)]
+        )
+        XCTAssertThrowsError(
+            try TypeChecker.typeCheck(
+                term: term,
+                declarations: env,
+                environment: ["b": box]
+            )
+        ) { error in
+            guard case .largeElimination(let inductive, _) = error as? TypeError else {
+                return XCTFail("Expected largeElimination, got \(error)")
+            }
+            XCTAssertEqual(inductive, "Box")
+        }
+    }
+
+    func testMatchOnPropInductiveAcceptsPropMotive() throws {
+        var env = DeclarationEnvironment()
+        let box = Term.variable("Box")
+        try env.add(Declaration(name: "Box", kind: .inductive, type: .prop))
+        try env.add(Declaration(name: "here", kind: .constructor, type: box))
+        try env.closeInductive("Box")
+
+        let motive = Term.constantMotive(scrutineeType: box, returnType: .variable("Q"))
+        let term = Term.match(
+            scrutinee: .variable("b"),
+            motive: motive,
+            cases: ["here": .variable("q")]
+        )
+        let inferred = try TypeChecker.typeCheck(
+            term: term,
+            declarations: env,
+            environment: ["b": box, "Q": .prop, "q": .variable("Q")]
+        )
+        XCTAssertTrue(try Conversion().areDefinitionallyEqual(inferred, .variable("Q")))
+    }
+
+    func testMatchOnNatAcceptsPropMotive() throws {
+        let motive = Term.constantMotive(scrutineeType: nat, returnType: .variable("Q"))
+        let term = Term.match(
+            scrutinee: .variable("n"),
+            motive: motive,
+            cases: [
+                "zero": .variable("q"),
+                "succ": Term.abstraction(param: "k", type: nat, body: .variable("q")),
+            ]
+        )
+        let inferred = try TypeChecker.typeCheck(
+            term: term,
+            declarations: try natEnvironment(),
+            environment: ["n": nat, "Q": .prop, "q": .variable("Q")]
+        )
+        XCTAssertTrue(try Conversion().areDefinitionallyEqual(inferred, .variable("Q")))
+    }
 }

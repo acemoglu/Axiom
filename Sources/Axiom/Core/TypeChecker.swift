@@ -48,6 +48,9 @@ public enum TypeError: Error, Equatable, Sendable {
     /// Constructor branch indices do not unify with the scrutinee's indices.
     case indexMismatch(constructor: String, expected: Term, actual: Term)
 
+    /// `match` on an inductive in `Prop` whose motive lands in `Type`.
+    case largeElimination(inductive: String, motive: Term)
+
     /// Normalization exceeded the reduction fuel budget while checking this term.
     case reductionOutOfBounds(Term)
 }
@@ -235,7 +238,26 @@ public struct TypeChecker {
                 term: motiveCodomain,
                 environment: motiveEnvironment
             )
-            _ = try expectUniverseLevel(of: motiveCodomain, inferredType: codomainSort)
+            let resultInhabitsProp: Bool
+            switch motiveCodomain.kind {
+            case .prop:
+                resultInhabitsProp = true
+            default:
+                if case .prop = codomainSort.kind {
+                    resultInhabitsProp = true
+                } else {
+                    resultInhabitsProp = false
+                }
+            }
+            if resultInhabitsProp == false {
+                _ = try expectUniverseLevel(of: motiveCodomain, inferredType: codomainSort)
+                if case .prop = try inductiveSort(for: inductiveName) {
+                    throw TypeError.largeElimination(
+                        inductive: inductiveName,
+                        motive: motiveCodomain
+                    )
+                }
+            }
             let constructorNames = allConstructors(for: inductiveName)
             if constructorNames.isEmpty {
                 for spuriousCase in cases.keys.sorted() {
@@ -803,6 +825,9 @@ public struct TypeChecker {
         inductiveName: String,
         constructorType: Term
     ) throws {
+        if case .prop = try inductiveSort(for: inductiveName) {
+            return
+        }
         let level = try inductiveLevel(for: inductiveName)
         do {
             try UniverseChecker().checkConstructorType(
@@ -827,24 +852,27 @@ public struct TypeChecker {
         try checkConstructorUniverses(inductiveName: inductiveName, constructorType: constructorType)
     }
 
-    private func inductiveLevel(for inductiveName: String) throws -> Int {
+    private func inductiveSort(for inductiveName: String) throws -> InductiveFamily.FamilySort {
         guard let declaration = declarations.lookup(inductiveName) else {
             throw TypeError.unknownInductive(inductiveName)
         }
         switch declaration.kind {
-        case .inductive:
-            guard case .universe(let level) = declaration.type.kind else {
+        case .inductive, .definition, .constant, .theorem:
+            guard let sort = InductiveFamily.familySort(declaration.type) else {
                 throw TypeError.invalidInductiveSort(inductiveName, declaration.type)
             }
-            return level
-        case .definition, .constant, .theorem:
-            guard let level = InductiveFamily.familyUniverseLevel(declaration.type) else {
-                throw TypeError.invalidInductiveSort(inductiveName, declaration.type)
-            }
-            return level
+            return sort
         case .axiom, .constructor:
             throw TypeError.unknownInductive(inductiveName)
         }
+    }
+
+    private func inductiveLevel(for inductiveName: String) throws -> Int {
+        guard case .type(let level) = try inductiveSort(for: inductiveName) else {
+            let sort = declarations.lookup(inductiveName)?.type ?? .prop
+            throw TypeError.invalidInductiveSort(inductiveName, sort)
+        }
+        return level
     }
 
     /// Verifies strict positivity and predicative universes for every constructor.
@@ -860,20 +888,21 @@ public struct TypeChecker {
         } catch let PositivityError.unresolvedHole(hole, inductive, occurrence) {
             throw TypeError.unresolvedPositivityHole(hole, inductive: inductive, occurrence: occurrence)
         }
-        let level = try inductiveLevel(for: inductiveName)
-        for constructorType in constructorTypes {
-            do {
-                try UniverseChecker().checkConstructorType(
-                    constructorType,
-                    inductiveName: inductiveName,
-                    inductiveLevel: level
-                )
-            } catch let UniversePolicyError.impredicativeQuantification(inductive, universeLevel, occurrence) {
-                throw TypeError.impredicativeQuantification(
-                    inductive: inductive,
-                    universeLevel: universeLevel,
-                    occurrence: occurrence
-                )
+        if case .type(let level) = try inductiveSort(for: inductiveName) {
+            for constructorType in constructorTypes {
+                do {
+                    try UniverseChecker().checkConstructorType(
+                        constructorType,
+                        inductiveName: inductiveName,
+                        inductiveLevel: level
+                    )
+                } catch let UniversePolicyError.impredicativeQuantification(inductive, universeLevel, occurrence) {
+                    throw TypeError.impredicativeQuantification(
+                        inductive: inductive,
+                        universeLevel: universeLevel,
+                        occurrence: occurrence
+                    )
+                }
             }
         }
     }
@@ -1411,7 +1440,11 @@ public struct TypeChecker {
             return motiveInstance
         case .variable(let name):
             if environment[name] != nil {
-                return try typeCheck(term: motiveInstance, environment: environment)
+                let variableType = try typeCheck(term: motiveInstance, environment: environment)
+                if case .prop = variableType.kind {
+                    return motiveInstance
+                }
+                return variableType
             }
             if declarations.lookup(name) != nil {
                 return motiveInstance

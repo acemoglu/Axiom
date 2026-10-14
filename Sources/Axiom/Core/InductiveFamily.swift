@@ -48,18 +48,32 @@ enum InductiveFamily {
         }
     }
 
-    /// *Π(_:A). … Type_i* — an indexed family sort.
+    enum FamilySort: Equatable {
+        case type(Int)
+        case prop
+    }
+
+    /// *Π(_:A). … Type_i* or *Π(_:A). … Prop* — an indexed family sort.
     static func isIndexedFamilyType(_ type: Term) -> Bool {
         guard case .pi = type.kind else { return false }
-        return familyUniverseLevel(type) != nil
+        return familySort(type) != nil
+    }
+
+    /// Sort of the family result after peeling dependent binders.
+    static func familySort(_ type: Term) -> FamilySort? {
+        switch codomain(of: type).kind {
+        case .prop:
+            return .prop
+        case .universe(let level):
+            return .type(level)
+        default:
+            return nil
+        }
     }
 
     /// Universe level of the family result after peeling dependent binders.
     static func familyUniverseLevel(_ type: Term) -> Int? {
-        let result = codomain(of: type)
-        if case .universe(let level) = result.kind {
-            return level
-        }
-        return nil
+        guard case .type(let level) = familySort(type) else { return nil }
+        return level
     }
 }
