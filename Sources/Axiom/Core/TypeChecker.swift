@@ -54,6 +54,9 @@ public enum TypeError: Error, Equatable, Sendable {
     /// `match` on an inductive in `Prop` whose motive lands in `Type`.
     case largeElimination(inductive: String, motive: Term)
 
+    /// A non-axiom declaration inhabits a closed inductive that has no constructors.
+    case inconsistentDeclaration(String, Term)
+
     /// Normalization exceeded the reduction fuel budget while checking this term.
     case reductionOutOfBounds(Term)
 }
@@ -366,6 +369,11 @@ public struct TypeChecker {
             return
 
         default:
+            do {
+                try declarations.ensureConsistent(declaration)
+            } catch let DeclarationEnvironmentError.inconsistentDeclaration(name, type) {
+                throw TypeError.inconsistentDeclaration(name, type)
+            }
             _ = try typeCheck(term: declaration.type)
             if requiresFullyResolvedTerms(declaration.kind) {
                 try rejectUnresolvedTermHoles(in: declaration.type)
@@ -928,6 +936,8 @@ public struct TypeChecker {
             throw TypeError.inductiveAlreadyClosed(name)
         } catch let DeclarationEnvironmentError.incompleteMutualBlock(missing, referencedBy) {
             throw TypeError.incompleteMutualBlock(missing: missing, referencedBy: referencedBy)
+        } catch let DeclarationEnvironmentError.inconsistentDeclaration(name, type) {
+            throw TypeError.inconsistentDeclaration(name, type)
         } catch let DeclarationEnvironmentError.invalidInductiveSort(name, sort) {
             throw TypeError.invalidInductiveSort(name, sort)
         } catch let PositivityError.negativeOccurrence(inductive, occurrence) {

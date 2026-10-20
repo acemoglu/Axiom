@@ -885,4 +885,100 @@ final class SoundnessTests: XCTestCase {
             )
         )
     }
+
+    func testAxiomMayPostulateFalse() throws {
+        var checker = TypeChecker(declarations: try falseEnvironment())
+        XCTAssertNoThrow(
+            try checker.checkDeclaration(
+                Declaration(name: "bad", kind: .axiom, type: .variable("False"))
+            )
+        )
+    }
+
+    func testValuelessTheoremOfFalseIsRejected() throws {
+        var checker = TypeChecker(declarations: try falseEnvironment())
+        XCTAssertThrowsError(
+            try checker.checkDeclaration(
+                Declaration(name: "bad", kind: .theorem, type: .variable("False"))
+            )
+        ) { error in
+            XCTAssertEqual(
+                error as? TypeError,
+                .inconsistentDeclaration("bad", .variable("False"))
+            )
+        }
+    }
+
+    func testDefinitionOfFalseFromAnAxiomIsRejected() throws {
+        var checker = TypeChecker(declarations: try falseEnvironment())
+        try checker.checkDeclaration(
+            Declaration(name: "bad", kind: .axiom, type: .variable("False"))
+        )
+        XCTAssertThrowsError(
+            try checker.checkDeclaration(
+                Declaration(
+                    name: "boom",
+                    kind: .definition,
+                    type: .variable("False"),
+                    value: .variable("bad")
+                )
+            )
+        ) { error in
+            XCTAssertEqual(
+                error as? TypeError,
+                .inconsistentDeclaration("boom", .variable("False"))
+            )
+        }
+    }
+
+    func testFunctionOnFalseIsAllowed() throws {
+        let falseType = Term.variable("False")
+        var checker = TypeChecker(declarations: try falseEnvironment())
+        XCTAssertNoThrow(
+            try checker.checkDeclaration(
+                Declaration(
+                    name: "id",
+                    kind: .theorem,
+                    type: Term.pi(param: "x", type: falseType, body: falseType),
+                    value: Term.abstraction(param: "x", type: falseType, body: .variable("x"))
+                )
+            )
+        )
+    }
+
+    func testValuelessFunctionIntoFalseIsRejected() throws {
+        var env = try natEnvironment()
+        try env.add(Declaration(name: "False", kind: .inductive, type: .universe(0)))
+        try env.closeInductive("False")
+        var checker = TypeChecker(declarations: env)
+        let intoFalse = Term.pi(param: "n", type: nat, body: .variable("False"))
+        XCTAssertThrowsError(
+            try checker.checkDeclaration(
+                Declaration(name: "bad", kind: .theorem, type: intoFalse)
+            )
+        ) { error in
+            XCTAssertEqual(error as? TypeError, .inconsistentDeclaration("bad", intoFalse))
+        }
+    }
+
+    func testClosingEmptyInductiveRejectsAnEarlierInhabitant() throws {
+        var env = DeclarationEnvironment()
+        let falseType = Term.variable("False")
+        try env.add(Declaration(name: "False", kind: .inductive, type: .universe(0)))
+        try env.add(Declaration(name: "bad", kind: .theorem, type: falseType))
+        XCTAssertThrowsError(try env.closeInductive("False")) { error in
+            XCTAssertEqual(
+                error as? DeclarationEnvironmentError,
+                .inconsistentDeclaration("bad", falseType)
+            )
+        }
+        XCTAssertFalse(env.isInductiveClosed("False"))
+    }
+
+    private func falseEnvironment() throws -> DeclarationEnvironment {
+        var env = DeclarationEnvironment()
+        try env.add(Declaration(name: "False", kind: .inductive, type: .universe(0)))
+        try env.closeInductive("False")
+        return env
+    }
 }

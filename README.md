@@ -36,7 +36,7 @@ The argument is **where** verification lives: inside the software you already sh
 * Structural termination on `match`-based recursion
 * Metavariable holes solved by unification
 * Fuel-bounded normalization (`TypeError.reductionOutOfBounds` when you run out)
-* **Road to v1.0 soundness:** tighten declaration admission with an inconsistency guard so non-axiom declarations cannot encode contradiction paths
+* Inconsistency guard: a non-axiom cannot inhabit a closed empty inductive. An axiom may postulate one
 
 ## Installation
 
@@ -227,7 +227,7 @@ v1.0 is the soundness floor on the road to a trusted kernel. The model that reas
 
 ## Known limitations
 
-Minimal CIC fragment today: `Prop` is a sort, `Prop : Type₁`, and a Π whose codomain inhabits `Prop` inhabits `Prop`. `match` on an inductive in `Prop` must return a term in `Prop`. `let x : A := v in t` reduces by substituting `v` into `t`. η is function extensionality only (`λx. f x ≡ f`). Universe cumulativity is `Typeᵢ ≤ Typeⱼ` for `i ≤ j`, and it lifts through Π on the codomain. Domains stay convertible. It does not yet apply to inductive families. No parser, no tactics, no Mathlib. Soundness evidence today is engineering plus tests, not a formal certificate yet. The inconsistency guard hardening and differential/property-based testing against established kernels are part of the path to stronger v1.0 soundness claims.
+Minimal CIC fragment today: `Prop` is a sort, `Prop : Type₁`, and a Π whose codomain inhabits `Prop` inhabits `Prop`. `match` on an inductive in `Prop` must return a term in `Prop`. `let x : A := v in t` reduces by substituting `v` into `t`. η is function extensionality only (`λx. f x ≡ f`). Universe cumulativity is `Typeᵢ ≤ Typeⱼ` for `i ≤ j`, and it lifts through Π on the codomain. Domains stay convertible. It does not yet apply to inductive families. No parser, no tactics, no Mathlib. Soundness evidence today is engineering plus tests, not a formal certificate yet. A non-axiom cannot inhabit a closed inductive with no constructors; an axiom may still postulate one. `False → False` stays, because every domain is empty. Differential testing against established kernels is still part of the path to a formal soundness claim.
 
 Structural termination is intentionally narrow. A recursive definition is accepted only when, after the outer lambdas, the body is a `match` on one parameter, and every recursive call passes a pattern binder of that match in that parameter's argument position. Descent on a different argument does not count. Nested recursion, well-founded measures, and size-change termination are rejected. This misses some terminating functions; it does not accept the unsound "any argument got smaller" pattern.
 

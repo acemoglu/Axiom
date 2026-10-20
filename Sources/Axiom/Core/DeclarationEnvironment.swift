@@ -56,6 +56,8 @@ public enum DeclarationEnvironmentError: Error, Equatable, Sendable {
     case missingInductiveDeclaration(String)
     /// Inductive sort must be `Typeᵢ` or `Prop`.
     case invalidInductiveSort(String, Term)
+    /// A non-axiom declaration inhabits a closed inductive that has no constructors.
+    case inconsistentDeclaration(String, Term)
     /// `missing` occurs in a constructor of `referencedBy`, is not closed, and is not in the block.
     case incompleteMutualBlock(missing: String, referencedBy: String)
     /// Declarations with values must be registered through ``TypeChecker/checkDeclaration``.
@@ -104,6 +106,7 @@ public struct DeclarationEnvironment: Equatable, Sendable {
         if declaration.value != nil, requiresTypeCheckerValidation(declaration.kind) {
             throw DeclarationEnvironmentError.requiresTypeChecker(declaration.name)
         }
+        try ensureConsistent(declaration)
         if declaration.kind == .constructor {
             if let inductiveName = inductiveName(inConstructorType: declaration.type),
                closedInductives.contains(inductiveName) {
@@ -275,7 +278,59 @@ public struct DeclarationEnvironment: Equatable, Sendable {
             }
         }
 
+        if mutualBlock.contains(where: { constructors(for: $0).isEmpty }) {
+            for declaration in allDeclarations {
+                try ensureConsistent(declaration, closing: mutualBlock)
+            }
+        }
+
         closedInductives.formUnion(mutualBlock)
+    }
+
+    /// Rejects a definition, theorem, or constant that yields a closed empty inductive.
+    /// `False → False` stays: every domain is itself empty, so applying it needs a contradiction
+    /// already. `Nat → False` does not. Axioms are exempt.
+    func ensureConsistent(_ declaration: Declaration, closing: Set<String> = []) throws {
+        switch declaration.kind {
+        case .axiom, .inductive, .constructor:
+            return
+        case .definition, .theorem, .constant:
+            break
+        }
+        if try admitsEmptyInductive(declaration.type, closing: closing) {
+            throw DeclarationEnvironmentError.inconsistentDeclaration(declaration.name, declaration.type)
+        }
+    }
+
+    private func admitsEmptyInductive(_ type: Term, closing: Set<String>) throws -> Bool {
+        var budget = ReductionBudget()
+        let normalized = try Conversion(strategy: .normalForm).normalize(
+            type,
+            budget: &budget,
+            unfolding: positivityUnfolding()
+        )
+        var domains: [Term] = []
+        var current = normalized
+        while case .pi(let hint, let domain, let rawBody) = current.kind {
+            domains.append(domain)
+            current = rawBody.instantiated(with: .variable(hint))
+        }
+        guard isClosedEmptyInductive(current, closing: closing) else { return false }
+        if domains.isEmpty { return true }
+        for domain in domains {
+            if isClosedEmptyInductive(domain, closing: closing) == false {
+                return true
+            }
+        }
+        return false
+    }
+
+    private func isClosedEmptyInductive(_ type: Term, closing: Set<String>) -> Bool {
+        let (head, _) = InductiveFamily.peelApplicationSpine(type)
+        guard let name = InductiveFamily.eliminationHeadName(head) else { return false }
+        guard let declaration = lookup(name), isEliminableFamily(declaration) else { return false }
+        guard closedInductives.union(closing).contains(declaration.name) else { return false }
+        return constructors(for: declaration.name).isEmpty
     }
 
     /// Every unclosed inductive mentioned by the block's constructors has to be in the block.
