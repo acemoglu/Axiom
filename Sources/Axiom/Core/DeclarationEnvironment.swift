@@ -56,6 +56,8 @@ public enum DeclarationEnvironmentError: Error, Equatable, Sendable {
     case missingInductiveDeclaration(String)
     /// Inductive sort must be `Typeᵢ` or `Prop`.
     case invalidInductiveSort(String, Term)
+    /// `missing` occurs in a constructor of `referencedBy`, is not closed, and is not in the block.
+    case incompleteMutualBlock(missing: String, referencedBy: String)
     /// Declarations with values must be registered through ``TypeChecker/checkDeclaration``.
     case requiresTypeChecker(String)
 }
@@ -246,6 +248,8 @@ public struct DeclarationEnvironment: Equatable, Sendable {
             throw DeclarationEnvironmentError.inductiveAlreadyClosed(alreadyClosed)
         }
 
+        try ensureMutualBlockIsComplete(mutualBlock)
+
         let constructorTypes = mutualBlock
             .sorted()
             .flatMap { constructors(for: $0).map(\.type) }
@@ -272,6 +276,83 @@ public struct DeclarationEnvironment: Equatable, Sendable {
         }
 
         closedInductives.formUnion(mutualBlock)
+    }
+
+    /// Every unclosed inductive mentioned by the block's constructors has to be in the block.
+    /// An already closed inductive, such as `Nat` used as a parameter, stays outside it.
+    private func ensureMutualBlockIsComplete(_ mutualBlock: Set<String>) throws {
+        let unfolding = positivityUnfolding()
+        for inductiveName in mutualBlock.sorted() {
+            for constructor in constructors(for: inductiveName) {
+                var visiting: Set<String> = []
+                var found: Set<String> = []
+                referencedFamilies(
+                    in: constructor.type,
+                    unfolding: unfolding,
+                    visiting: &visiting,
+                    found: &found
+                )
+                for family in found.sorted() {
+                    if mutualBlock.contains(family) { continue }
+                    if closedInductives.contains(family) { continue }
+                    throw DeclarationEnvironmentError.incompleteMutualBlock(
+                        missing: family,
+                        referencedBy: inductiveName
+                    )
+                }
+            }
+        }
+    }
+
+    private func referencedFamilies(
+        in term: Term,
+        unfolding: [String: Term],
+        visiting: inout Set<String>,
+        found: inout Set<String>
+    ) {
+        switch term.kind {
+        case .variable(let name):
+            if let declaration = declaration(named: name), isEliminableFamily(declaration) {
+                found.insert(declaration.name)
+                return
+            }
+            if visiting.contains(name) { return }
+            visiting.insert(name)
+            if let unfolded = unfolding[name] {
+                referencedFamilies(in: unfolded, unfolding: unfolding, visiting: &visiting, found: &found)
+            }
+        case .boundVariable, .hole, .universe, .prop:
+            return
+        case .pi(_, let domain, let body), .abstraction(_, let domain, let body):
+            referencedFamilies(in: domain, unfolding: unfolding, visiting: &visiting, found: &found)
+            referencedFamilies(in: body, unfolding: unfolding, visiting: &visiting, found: &found)
+        case .application(let function, let argument):
+            referencedFamilies(in: function, unfolding: unfolding, visiting: &visiting, found: &found)
+            referencedFamilies(in: argument, unfolding: unfolding, visiting: &visiting, found: &found)
+        case .localLet(_, let declaredType, let value, let body):
+            referencedFamilies(in: declaredType, unfolding: unfolding, visiting: &visiting, found: &found)
+            referencedFamilies(in: value, unfolding: unfolding, visiting: &visiting, found: &found)
+            referencedFamilies(in: body, unfolding: unfolding, visiting: &visiting, found: &found)
+        case .inductive(let name, let type):
+            found.insert(name)
+            referencedFamilies(in: type, unfolding: unfolding, visiting: &visiting, found: &found)
+        case .constructor(_, let inductiveName, let type):
+            found.insert(inductiveName)
+            referencedFamilies(in: type, unfolding: unfolding, visiting: &visiting, found: &found)
+        case .match(let scrutinee, let motive, let cases):
+            referencedFamilies(in: scrutinee, unfolding: unfolding, visiting: &visiting, found: &found)
+            referencedFamilies(in: motive, unfolding: unfolding, visiting: &visiting, found: &found)
+            for branch in cases.values {
+                referencedFamilies(in: branch, unfolding: unfolding, visiting: &visiting, found: &found)
+            }
+        }
+    }
+
+    private func declaration(named name: String) -> Declaration? {
+        if let declaration = declarationsByName[name] {
+            return declaration
+        }
+        return lookup(resolvingQualifiedName: name)
     }
 
     public func constructors(for parentInductive: String) -> [Declaration] {

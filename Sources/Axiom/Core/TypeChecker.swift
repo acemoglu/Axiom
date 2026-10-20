@@ -41,6 +41,9 @@ public enum TypeError: Error, Equatable, Sendable {
 
     case inductiveAlreadyClosed(String)
 
+    /// An unclosed inductive is mentioned by this block and was left out of it.
+    case incompleteMutualBlock(missing: String, referencedBy: String)
+
     case impredicativeQuantification(inductive: String, universeLevel: Int, occurrence: Term)
 
     case invalidInductiveSort(String, Term)
@@ -923,6 +926,8 @@ public struct TypeChecker {
             throw TypeError.unknownInductive(name)
         } catch let DeclarationEnvironmentError.inductiveAlreadyClosed(name) {
             throw TypeError.inductiveAlreadyClosed(name)
+        } catch let DeclarationEnvironmentError.incompleteMutualBlock(missing, referencedBy) {
+            throw TypeError.incompleteMutualBlock(missing: missing, referencedBy: referencedBy)
         } catch let DeclarationEnvironmentError.invalidInductiveSort(name, sort) {
             throw TypeError.invalidInductiveSort(name, sort)
         } catch let PositivityError.negativeOccurrence(inductive, occurrence) {

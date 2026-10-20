@@ -365,6 +365,7 @@ final class InductiveTypesTests: XCTestCase {
 
         var env = DeclarationEnvironment()
         try env.add(Declaration(name: "Nat", kind: .inductive, type: .universe(0)))
+        try env.closeInductive("Nat")
         try env.add(Declaration(name: "List", kind: .inductive, type: .universe(0)))
         try env.add(Declaration(name: "nil", kind: .constructor, type: list))
         try env.add(Declaration(name: "cons", kind: .constructor, type: consType))
