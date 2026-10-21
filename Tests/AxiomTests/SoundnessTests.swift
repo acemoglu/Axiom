@@ -205,6 +205,41 @@ final class SoundnessTests: XCTestCase {
         }
     }
 
+    /// Π(x : Type₁). Type₀ is accepted where Π(x : Type₀). Type₁ is expected.
+    /// The other direction is rejected. The two products stay apart.
+    func testPiCumulativityIsContravariantOnTheDomain() throws {
+        let wide = Term.abstraction(param: "x", type: .universe(1), body: .variable("B"))
+        let narrowExpected = Term.pi(param: "x", type: .universe(0), body: .universe(1))
+        var checker = TypeChecker()
+        XCTAssertNoThrow(
+            try checker.checkTermMatchesType(
+                wide,
+                expected: narrowExpected,
+                environment: ["B": .universe(0)]
+            )
+        )
+        XCTAssertFalse(
+            try Conversion().areDefinitionallyEqual(
+                Term.pi(param: "x", type: .universe(1), body: .universe(0)),
+                narrowExpected
+            )
+        )
+
+        let narrow = Term.abstraction(param: "x", type: .universe(0), body: .variable("B"))
+        let wideExpected = Term.pi(param: "x", type: .universe(1), body: .universe(1))
+        XCTAssertThrowsError(
+            try checker.checkTermMatchesType(
+                narrow,
+                expected: wideExpected,
+                environment: ["B": .universe(0)]
+            )
+        ) { error in
+            guard case .typeMismatch = error as? TypeError else {
+                return XCTFail("Expected typeMismatch, got \(error)")
+            }
+        }
+    }
+
     func testLetSubstitutesValueAndHasBodyType() throws {
         let env = try natEnvironment()
         let term = Term.localLet(

@@ -676,8 +676,8 @@ public struct TypeChecker {
         }
     }
 
-    /// `Typeᵢ ≤ Typeⱼ` for `i ≤ j`, lifted through Π on the codomain only.
-    /// Domains must be convertible. This is not definitional equality.
+    /// `Typeᵢ ≤ Typeⱼ` for `i ≤ j`, lifted through Π.
+    /// Domains are contravariant and codomains are covariant. This is not definitional equality.
     private mutating func cumulativelySubsumes(subtype: Term, supertype: Term) throws -> Bool {
         let lower = try normalizedForComparison(subtype)
         let upper = try normalizedForComparison(supertype)
@@ -689,14 +689,8 @@ public struct TypeChecker {
         guard case .pi(_, let domain, let body) = lower.kind,
               case .pi(_, let expectedDomain, let expectedBody) = upper.kind
         else { return false }
-        let normalizedDomain = try normalizedForComparison(domain)
-        let normalizedExpectedDomain = try normalizedForComparison(expectedDomain)
-        let domainsMatch = normalizedDomain == normalizedExpectedDomain
-            || conversion.areDefinitionallyEqualAssumingNormalized(
-                normalizedDomain,
-                normalizedExpectedDomain
-            )
-        guard domainsMatch else { return false }
+        let domainAccepted = try cumulativelySubsumes(subtype: expectedDomain, supertype: domain)
+        guard domainAccepted else { return false }
         return try cumulativelySubsumes(subtype: body, supertype: expectedBody)
     }
 
