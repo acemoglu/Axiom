@@ -258,10 +258,16 @@ public struct TypeChecker {
             if resultInhabitsProp == false {
                 _ = try expectUniverseLevel(of: motiveCodomain, inferredType: codomainSort)
                 if case .prop = try inductiveSort(for: inductiveName) {
-                    throw TypeError.largeElimination(
-                        inductive: inductiveName,
-                        motive: motiveCodomain
+                    let permitted = try permitsLargeEliminationFromProp(
+                        inductiveName,
+                        environment: environment
                     )
+                    if permitted == false {
+                        throw TypeError.largeElimination(
+                            inductive: inductiveName,
+                            motive: motiveCodomain
+                        )
+                    }
                 }
             }
             let constructorNames = allConstructors(for: inductiveName)
@@ -861,6 +867,23 @@ public struct TypeChecker {
     ) throws {
         try checkConstructorPositivity(inductiveName: inductiveName, constructorType: constructorType)
         try checkConstructorUniverses(inductiveName: inductiveName, constructorType: constructorType)
+    }
+
+    /// `Prop` inductives eliminate into `Type` only when they are empty, or have one
+    /// constructor whose arguments all inhabit `Prop`.
+    private mutating func permitsLargeEliminationFromProp(
+        _ inductiveName: String,
+        environment: [String: Term]
+    ) throws -> Bool {
+        let constructors = declarations.constructors(for: inductiveName)
+        if constructors.isEmpty { return true }
+        guard constructors.count == 1, let constructor = constructors.first else { return false }
+        for (_, domain) in peelPiParams(from: constructor.type) {
+            let domainSort = try typeCheck(term: domain, environment: environment)
+            if case .prop = domainSort.kind { continue }
+            return false
+        }
+        return true
     }
 
     private func inductiveSort(for inductiveName: String) throws -> InductiveFamily.FamilySort {

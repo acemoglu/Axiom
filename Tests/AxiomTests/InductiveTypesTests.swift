@@ -1012,6 +1012,53 @@ final class InductiveTypesTests: XCTestCase {
 
     func testMatchOnPropInductiveRejectsTypeMotive() throws {
         var env = DeclarationEnvironment()
+        let choice = Term.variable("Choice")
+        try env.add(Declaration(name: "Choice", kind: .inductive, type: .prop))
+        try env.add(Declaration(name: "left", kind: .constructor, type: choice))
+        try env.add(Declaration(name: "right", kind: .constructor, type: choice))
+        try env.closeInductive("Choice")
+
+        let motive = Term.constantMotive(scrutineeType: choice, returnType: .universe(0))
+        let term = Term.match(
+            scrutinee: .variable("c"),
+            motive: motive,
+            cases: [
+                "left": .variable("a"),
+                "right": .variable("a"),
+            ]
+        )
+        XCTAssertThrowsError(
+            try TypeChecker.typeCheck(
+                term: term,
+                declarations: env,
+                environment: ["c": choice, "a": .universe(0)]
+            )
+        ) { error in
+            guard case .largeElimination(let inductive, _) = error as? TypeError else {
+                return XCTFail("Expected largeElimination, got \(error)")
+            }
+            XCTAssertEqual(inductive, "Choice")
+        }
+    }
+
+    func testEmptyPropInductiveEliminatesToType() throws {
+        var env = DeclarationEnvironment()
+        let falseType = Term.variable("False")
+        try env.add(Declaration(name: "False", kind: .inductive, type: .prop))
+        try env.closeInductive("False")
+
+        let motive = Term.constantMotive(scrutineeType: falseType, returnType: .universe(0))
+        let term = Term.match(scrutinee: .variable("f"), motive: motive, cases: [:])
+        let inferred = try TypeChecker.typeCheck(
+            term: term,
+            declarations: env,
+            environment: ["f": falseType]
+        )
+        XCTAssertTrue(try Conversion().areDefinitionallyEqual(inferred, .universe(0)))
+    }
+
+    func testSingletonPropInductiveEliminatesToType() throws {
+        var env = DeclarationEnvironment()
         let box = Term.variable("Box")
         try env.add(Declaration(name: "Box", kind: .inductive, type: .prop))
         try env.add(Declaration(name: "here", kind: .constructor, type: box))
@@ -1021,13 +1068,86 @@ final class InductiveTypesTests: XCTestCase {
         let term = Term.match(
             scrutinee: .variable("b"),
             motive: motive,
-            cases: ["here": .universe(0)]
+            cases: ["here": .variable("a")]
+        )
+        let inferred = try TypeChecker.typeCheck(
+            term: term,
+            declarations: env,
+            environment: ["b": box, "a": .universe(0)]
+        )
+        XCTAssertTrue(try Conversion().areDefinitionallyEqual(inferred, .universe(0)))
+    }
+
+    func testPropConjunctionEliminatesToType() throws {
+        var env = DeclarationEnvironment()
+        let conjunction = Term.variable("And")
+        let left = Term.variable("P")
+        let right = Term.variable("Q")
+        try env.add(Declaration(name: "And", kind: .inductive, type: .prop))
+        try env.add(
+            Declaration(
+                name: "conj",
+                kind: .constructor,
+                type: Term.pi(
+                    param: "p",
+                    type: left,
+                    body: Term.pi(param: "q", type: right, body: conjunction)
+                )
+            )
+        )
+        try env.closeInductive("And")
+
+        let motive = Term.constantMotive(scrutineeType: conjunction, returnType: .universe(0))
+        let term = Term.match(
+            scrutinee: .variable("pq"),
+            motive: motive,
+            cases: [
+                "conj": Term.abstraction(
+                    param: "p",
+                    type: left,
+                    body: Term.abstraction(param: "q", type: right, body: .variable("a"))
+                ),
+            ]
+        )
+        let inferred = try TypeChecker.typeCheck(
+            term: term,
+            declarations: env,
+            environment: [
+                "pq": conjunction,
+                "P": .prop,
+                "Q": .prop,
+                "a": .universe(0),
+            ]
+        )
+        XCTAssertTrue(try Conversion().areDefinitionallyEqual(inferred, .universe(0)))
+    }
+
+    func testPropConstructorWithTypeArgumentRejectsLargeElimination() throws {
+        var env = try natEnvironment()
+        let box = Term.variable("Box")
+        try env.add(Declaration(name: "Box", kind: .inductive, type: .prop))
+        try env.add(
+            Declaration(
+                name: "pack",
+                kind: .constructor,
+                type: Term.pi(param: "n", type: nat, body: box)
+            )
+        )
+        try env.closeInductive("Box")
+
+        let motive = Term.constantMotive(scrutineeType: box, returnType: .universe(0))
+        let term = Term.match(
+            scrutinee: .variable("b"),
+            motive: motive,
+            cases: [
+                "pack": Term.abstraction(param: "n", type: nat, body: .variable("a")),
+            ]
         )
         XCTAssertThrowsError(
             try TypeChecker.typeCheck(
                 term: term,
                 declarations: env,
-                environment: ["b": box]
+                environment: ["b": box, "a": .universe(0)]
             )
         ) { error in
             guard case .largeElimination(let inductive, _) = error as? TypeError else {
