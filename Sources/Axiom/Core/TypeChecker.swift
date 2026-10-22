@@ -61,6 +61,13 @@ public enum TypeError: Error, Equatable, Sendable {
     case reductionOutOfBounds(Term)
 }
 
+/// Where the single parameter of an inductive occurs in a constructor.
+private enum ParameterOccurrence {
+    case absent
+    case positive
+    case refused
+}
+
 // MARK: - Type checker
 
 /// Type checker for CIC with **metavariable inference** via ``Unifier``.
@@ -656,7 +663,7 @@ public struct TypeChecker {
     }
 
     /// Expected type may be a higher universe than the inferred type, including
-    /// under a Π codomain. This is not definitional equality.
+    /// under a Π codomain or a single covariant inductive parameter. This is not definitional equality.
     private mutating func ensureSubtype(
         expected: Term,
         actual: Term,
@@ -677,7 +684,10 @@ public struct TypeChecker {
     }
 
     /// `Typeᵢ ≤ Typeⱼ` for `i ≤ j`, lifted through Π.
-    /// Domains are contravariant and codomains are covariant. This is not definitional equality.
+    /// Domains are contravariant and codomains are covariant.
+    /// A closed inductive with one parameter and no indices also lifts, when that parameter
+    /// occurs only positively: `A ≤ B` gives `List A ≤ List B`. A negative occurrence does not.
+    /// This is not definitional equality.
     private mutating func cumulativelySubsumes(subtype: Term, supertype: Term) throws -> Bool {
         let lower = try normalizedForComparison(subtype)
         let upper = try normalizedForComparison(supertype)
@@ -686,12 +696,167 @@ public struct TypeChecker {
         if case .universe(let i) = lower.kind, case .universe(let j) = upper.kind {
             return i <= j
         }
-        guard case .pi(_, let domain, let body) = lower.kind,
-              case .pi(_, let expectedDomain, let expectedBody) = upper.kind
+        if case .pi(_, let domain, let body) = lower.kind,
+           case .pi(_, let expectedDomain, let expectedBody) = upper.kind {
+            let domainAccepted = try cumulativelySubsumes(subtype: expectedDomain, supertype: domain)
+            guard domainAccepted else { return false }
+            return try cumulativelySubsumes(subtype: body, supertype: expectedBody)
+        }
+        return try singleCovariantParameterSubsumes(lower, upper)
+    }
+
+    /// `List A ≤ List B` for a closed inductive whose only argument is a covariant parameter.
+    private mutating func singleCovariantParameterSubsumes(_ lower: Term, _ upper: Term) throws -> Bool {
+        guard let lowerApp = closedInductiveApplication(lower),
+              let upperApp = closedInductiveApplication(upper),
+              lowerApp.name == upperApp.name,
+              lowerApp.arguments.count == 1,
+              hasOneCovariantParameter(lowerApp.name)
         else { return false }
-        let domainAccepted = try cumulativelySubsumes(subtype: expectedDomain, supertype: domain)
-        guard domainAccepted else { return false }
-        return try cumulativelySubsumes(subtype: body, supertype: expectedBody)
+        return try cumulativelySubsumes(
+            subtype: lowerApp.arguments[0],
+            supertype: upperApp.arguments[0]
+        )
+    }
+
+    private func closedInductiveApplication(_ term: Term) -> (name: String, arguments: [Term])? {
+        let (head, arguments) = InductiveFamily.peelApplicationSpine(term)
+        guard let rawName = InductiveFamily.eliminationHeadName(head),
+              let declaration = declarations.lookup(rawName)
+                ?? declarations.lookup(resolvingQualifiedName: rawName),
+              declaration.kind == .inductive,
+              declarations.isInductiveClosed(declaration.name)
+        else { return nil }
+        return (declaration.name, arguments)
+    }
+
+    /// One parameter, no indices, and every occurrence of that parameter is positive.
+    private func hasOneCovariantParameter(_ name: String) -> Bool {
+        guard let declaration = declarations.lookup(name),
+              declaration.kind == .inductive,
+              leadingPiCount(declaration.type) == 1
+        else { return false }
+        let constructors = declarations.constructors(for: name)
+        guard !constructors.isEmpty else { return false }
+        var sawPositive = false
+        for constructor in constructors {
+            switch parameterOccurrence(in: constructor.type, inductiveName: name) {
+            case .positive:
+                sawPositive = true
+            case .absent:
+                break
+            case .refused:
+                return false
+            }
+        }
+        return sawPositive
+    }
+
+    private func leadingPiCount(_ type: Term) -> Int {
+        var count = 0
+        var current = type
+        while case .pi(_, _, let body) = current.kind {
+            count += 1
+            current = body
+        }
+        return count
+    }
+
+    /// How the single parameter occurs in one constructor. `.refused` means the inductive
+    /// does not get this rule: a negative occurrence, an index, or a second parameter.
+    private func parameterOccurrence(in constructorType: Term, inductiveName: String) -> ParameterOccurrence {
+        var used: Set<String> = []
+        var binders: [String] = []
+        var domains: [Term] = []
+        var current = constructorType
+        while case .pi(let hint, let domain, let body) = current.kind {
+            let name = freshBinder(hint, used: &used)
+            binders.append(name)
+            domains.append(domain)
+            current = body.instantiated(with: .variable(name))
+        }
+        guard let parameter = binders.first else { return .refused }
+        let (head, arguments) = InductiveFamily.peelApplicationSpine(current)
+        guard inductiveHead(head, equals: inductiveName),
+              arguments.count == 1,
+              case .variable(let returned) = arguments[0].kind,
+              returned == parameter
+        else { return .refused }
+
+        var result = ParameterOccurrence.absent
+        for domain in domains.dropFirst() {
+            result = merge(
+                result,
+                scanning(parameter, in: domain, positive: true, inductiveName: inductiveName)
+            )
+            if case .refused = result { return .refused }
+        }
+        return result
+    }
+
+    private func scanning(
+        _ parameter: String,
+        in term: Term,
+        positive: Bool,
+        inductiveName: String
+    ) -> ParameterOccurrence {
+        switch term.kind {
+        case .variable(let name):
+            guard name == parameter else { return .absent }
+            return positive ? .positive : .refused
+        case .pi(let hint, let domain, let body):
+            let domainUse = scanning(parameter, in: domain, positive: !positive, inductiveName: inductiveName)
+            var used = term.freeVariables
+            used.insert(parameter)
+            let name = freshBinder(hint, used: &used)
+            let bodyUse = scanning(
+                parameter,
+                in: body.instantiated(with: .variable(name)),
+                positive: positive,
+                inductiveName: inductiveName
+            )
+            return merge(domainUse, bodyUse)
+        case .application:
+            let (head, arguments) = InductiveFamily.peelApplicationSpine(term)
+            if positive,
+               inductiveHead(head, equals: inductiveName),
+               arguments.count == 1,
+               case .variable(let name) = arguments[0].kind,
+               name == parameter {
+                return .absent
+            }
+            return term.freeVariables.contains(parameter) ? .refused : .absent
+        default:
+            return term.freeVariables.contains(parameter) ? .refused : .absent
+        }
+    }
+
+    private func merge(_ left: ParameterOccurrence, _ right: ParameterOccurrence) -> ParameterOccurrence {
+        switch (left, right) {
+        case (.refused, _), (_, .refused):
+            return .refused
+        case (.positive, _), (_, .positive):
+            return .positive
+        default:
+            return .absent
+        }
+    }
+
+    private func inductiveHead(_ head: Term, equals inductiveName: String) -> Bool {
+        guard let rawName = InductiveFamily.eliminationHeadName(head) else { return false }
+        if rawName == inductiveName { return true }
+        if let declaration = declarations.lookup(rawName), declaration.name == inductiveName { return true }
+        if let declaration = declarations.lookup(resolvingQualifiedName: rawName),
+           declaration.name == inductiveName {
+            return true
+        }
+        return false
+    }
+
+    private func freshBinder(_ hint: String, used: inout Set<String>) -> String {
+        let name = used.contains(hint) ? Term.freshName(avoiding: used) : hint
+        used.insert(name)
+        return name
     }
 
     /// Definitional equality only — no metavariable solving (trusted checking).
