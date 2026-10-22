@@ -65,7 +65,14 @@ public enum TypeError: Error, Equatable, Sendable {
 private enum ParameterOccurrence {
     case absent
     case positive
+    case negative
     case refused
+}
+
+/// Direction in which that one parameter may lift. Both polarities at once do not.
+private enum SingleParameterVariance {
+    case covariant
+    case contravariant
 }
 
 // MARK: - Type checker
@@ -685,9 +692,9 @@ public struct TypeChecker {
 
     /// `Typeᵢ ≤ Typeⱼ` for `i ≤ j`, lifted through Π.
     /// Domains are contravariant and codomains are covariant.
-    /// A closed inductive with one covariant parameter also lifts: `A ≤ B` gives `List A ≤ List B`
-    /// and `Vec A n ≤ Vec B n`. Indices stay on definitional equality. A negative occurrence,
-    /// or a second parameter, does not. This is not definitional equality.
+    /// A closed inductive with one parameter also lifts. Positive gives `List A ≤ List B` and
+    /// `Vec A n ≤ Vec B n`. Negative gives `Pred B ≤ Pred A`. Indices stay on definitional
+    /// equality. Both polarities, or a second parameter, do not lift. This is not definitional equality.
     private mutating func cumulativelySubsumes(subtype: Term, supertype: Term) throws -> Bool {
         let lower = try normalizedForComparison(subtype)
         let upper = try normalizedForComparison(supertype)
@@ -702,24 +709,32 @@ public struct TypeChecker {
             guard domainAccepted else { return false }
             return try cumulativelySubsumes(subtype: body, supertype: expectedBody)
         }
-        return try singleCovariantParameterSubsumes(lower, upper)
+        return try singleParameterSubsumes(lower, upper)
     }
 
-    /// `List A ≤ List B`, and `Vec A n ≤ Vec B n` when `n` matches. The first argument is the
-    /// only parameter. Later arguments are indices.
-    private mutating func singleCovariantParameterSubsumes(_ lower: Term, _ upper: Term) throws -> Bool {
+    /// One parameter. Positive arguments lift with the parameter; negative ones lift against it.
+    /// Later arguments are indices and must match.
+    private mutating func singleParameterSubsumes(_ lower: Term, _ upper: Term) throws -> Bool {
         guard let lowerApp = closedInductiveApplication(lower),
               let upperApp = closedInductiveApplication(upper),
               lowerApp.name == upperApp.name,
               lowerApp.arguments.count == upperApp.arguments.count,
               let declaration = declarations.lookup(lowerApp.name),
               leadingPiCount(declaration.type) == lowerApp.arguments.count,
-              hasOneCovariantParameter(lowerApp.name)
+              let variance = singleParameterVariance(lowerApp.name)
         else { return false }
-        guard try cumulativelySubsumes(
-            subtype: lowerApp.arguments[0],
-            supertype: upperApp.arguments[0]
-        ) else { return false }
+        let lowerArgument = lowerApp.arguments[0]
+        let upperArgument = upperApp.arguments[0]
+        switch variance {
+        case .covariant:
+            guard try cumulativelySubsumes(subtype: lowerArgument, supertype: upperArgument) else {
+                return false
+            }
+        case .contravariant:
+            guard try cumulativelySubsumes(subtype: upperArgument, supertype: lowerArgument) else {
+                return false
+            }
+        }
         for index in lowerApp.arguments.indices.dropFirst() {
             guard try definitionallyEqual(lowerApp.arguments[index], upperApp.arguments[index]) else {
                 return false
@@ -747,35 +762,37 @@ public struct TypeChecker {
         return (declaration.name, arguments)
     }
 
-    /// The first argument is the only parameter, and every occurrence of it is positive.
+    /// The first argument is the only parameter, and it occurs with one polarity.
     /// A longer uniform prefix is a second parameter, which this rule does not lift.
-    private func hasOneCovariantParameter(_ name: String) -> Bool {
+    private func singleParameterVariance(_ name: String) -> SingleParameterVariance? {
         guard let declaration = declarations.lookup(name),
               declaration.kind == .inductive
-        else { return false }
+        else { return nil }
         let arity = leadingPiCount(declaration.type)
-        guard arity >= 1 else { return false }
+        guard arity >= 1 else { return nil }
         let constructors = declarations.constructors(for: name)
-        guard !constructors.isEmpty else { return false }
+        guard !constructors.isEmpty else { return nil }
         var prefix = arity
-        var sawPositive = false
+        var use = ParameterOccurrence.absent
         for constructor in constructors {
             guard let inspected = inspectConstructor(
                 constructor.type,
                 inductiveName: name,
                 arity: arity
-            ) else { return false }
+            ) else { return nil }
             prefix = min(prefix, inspected.prefix)
-            switch inspected.use {
-            case .positive:
-                sawPositive = true
-            case .absent:
-                break
-            case .refused:
-                return false
-            }
+            use = merge(use, inspected.use)
+            if case .refused = use { return nil }
         }
-        return prefix == 1 && sawPositive
+        guard prefix == 1 else { return nil }
+        switch use {
+        case .positive:
+            return .covariant
+        case .negative:
+            return .contravariant
+        case .absent, .refused:
+            return nil
+        }
     }
 
     private func leadingPiCount(_ type: Term) -> Int {
@@ -789,7 +806,7 @@ public struct TypeChecker {
     }
 
     /// Uniform prefix of one constructor, and how its first parameter occurs.
-    /// `.refused` means a negative occurrence, or the parameter shows up inside an index.
+    /// `.refused` means both polarities, a non-polar position, or the parameter inside an index.
     private func inspectConstructor(
         _ constructorType: Term,
         inductiveName: String,
@@ -841,7 +858,7 @@ public struct TypeChecker {
         switch term.kind {
         case .variable(let name):
             guard name == parameter else { return .absent }
-            return positive ? .positive : .refused
+            return positive ? .positive : .negative
         case .pi(let hint, let domain, let body):
             let domainUse = scanning(parameter, in: domain, positive: !positive, inductiveName: inductiveName)
             var used = term.freeVariables
@@ -874,8 +891,12 @@ public struct TypeChecker {
         switch (left, right) {
         case (.refused, _), (_, .refused):
             return .refused
+        case (.positive, .negative), (.negative, .positive):
+            return .refused
         case (.positive, _), (_, .positive):
             return .positive
+        case (.negative, _), (_, .negative):
+            return .negative
         default:
             return .absent
         }
