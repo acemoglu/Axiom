@@ -69,10 +69,18 @@ private enum ParameterOccurrence {
     case refused
 }
 
-/// Direction in which that one parameter may lift. Both polarities at once do not.
+/// Direction in which one parameter may lift. Both polarities at once stay invariant.
 private enum SingleParameterVariance {
     case covariant
     case contravariant
+    case invariant
+}
+
+private struct OpenedInductiveConstructor {
+    var binders: [String]
+    var domains: [Term]
+    var arguments: [Term]
+    var prefix: Int
 }
 
 // MARK: - Type checker
@@ -692,9 +700,9 @@ public struct TypeChecker {
 
     /// `Typeᵢ ≤ Typeⱼ` for `i ≤ j`, lifted through Π.
     /// Domains are contravariant and codomains are covariant.
-    /// A closed inductive with one parameter also lifts. Positive gives `List A ≤ List B` and
-    /// `Vec A n ≤ Vec B n`. Negative gives `Pred B ≤ Pred A`. Indices stay on definitional
-    /// equality. Both polarities, or a second parameter, do not lift. This is not definitional equality.
+    /// Each parameter of a closed inductive lifts on its own. Positive gives `List A ≤ List B`
+    /// and `Pair A B ≤ Pair A' B'`. Negative gives `Pred B ≤ Pred A`. Indices, and a parameter
+    /// that occurs both ways, stay on definitional equality. This is not definitional equality.
     private mutating func cumulativelySubsumes(subtype: Term, supertype: Term) throws -> Bool {
         let lower = try normalizedForComparison(subtype)
         let upper = try normalizedForComparison(supertype)
@@ -712,8 +720,7 @@ public struct TypeChecker {
         return try singleParameterSubsumes(lower, upper)
     }
 
-    /// One parameter. Positive arguments lift with the parameter; negative ones lift against it.
-    /// Later arguments are indices and must match.
+    /// Each parameter lifts by its own variance. Arguments past that prefix are indices.
     private mutating func singleParameterSubsumes(_ lower: Term, _ upper: Term) throws -> Bool {
         guard let lowerApp = closedInductiveApplication(lower),
               let upperApp = closedInductiveApplication(upper),
@@ -721,23 +728,27 @@ public struct TypeChecker {
               lowerApp.arguments.count == upperApp.arguments.count,
               let declaration = declarations.lookup(lowerApp.name),
               leadingPiCount(declaration.type) == lowerApp.arguments.count,
-              let variance = singleParameterVariance(lowerApp.name)
+              let variances = parameterVariances(of: lowerApp.name),
+              variances.count <= lowerApp.arguments.count
         else { return false }
-        let lowerArgument = lowerApp.arguments[0]
-        let upperArgument = upperApp.arguments[0]
-        switch variance {
-        case .covariant:
-            guard try cumulativelySubsumes(subtype: lowerArgument, supertype: upperArgument) else {
-                return false
-            }
-        case .contravariant:
-            guard try cumulativelySubsumes(subtype: upperArgument, supertype: lowerArgument) else {
-                return false
-            }
-        }
-        for index in lowerApp.arguments.indices.dropFirst() {
-            guard try definitionallyEqual(lowerApp.arguments[index], upperApp.arguments[index]) else {
-                return false
+        for index in lowerApp.arguments.indices {
+            let lowerArgument = lowerApp.arguments[index]
+            let upperArgument = upperApp.arguments[index]
+            if index < variances.count {
+                switch variances[index] {
+                case .covariant:
+                    guard try cumulativelySubsumes(subtype: lowerArgument, supertype: upperArgument) else {
+                        return false
+                    }
+                case .contravariant:
+                    guard try cumulativelySubsumes(subtype: upperArgument, supertype: lowerArgument) else {
+                        return false
+                    }
+                case .invariant:
+                    guard try definitionallyEqual(lowerArgument, upperArgument) else { return false }
+                }
+            } else {
+                guard try definitionallyEqual(lowerArgument, upperArgument) else { return false }
             }
         }
         return true
@@ -762,36 +773,54 @@ public struct TypeChecker {
         return (declaration.name, arguments)
     }
 
-    /// The first argument is the only parameter, and it occurs with one polarity.
-    /// A longer uniform prefix is a second parameter, which this rule does not lift.
-    private func singleParameterVariance(_ name: String) -> SingleParameterVariance? {
+    /// One variance per parameter, in order. A parameter with no single polarity is invariant.
+    private func parameterVariances(of name: String) -> [SingleParameterVariance]? {
         guard let declaration = declarations.lookup(name),
               declaration.kind == .inductive
         else { return nil }
         let arity = leadingPiCount(declaration.type)
-        guard arity >= 1 else { return nil }
         let constructors = declarations.constructors(for: name)
-        guard !constructors.isEmpty else { return nil }
-        var prefix = arity
-        var use = ParameterOccurrence.absent
-        for constructor in constructors {
-            guard let inspected = inspectConstructor(
-                constructor.type,
-                inductiveName: name,
-                arity: arity
-            ) else { return nil }
-            prefix = min(prefix, inspected.prefix)
-            use = merge(use, inspected.use)
-            if case .refused = use { return nil }
+        guard !constructors.isEmpty else { return [] }
+        let opened = constructors.compactMap {
+            openConstructor($0.type, inductiveName: name, arity: arity)
         }
-        guard prefix == 1 else { return nil }
-        switch use {
-        case .positive:
-            return .covariant
-        case .negative:
-            return .contravariant
-        case .absent, .refused:
-            return nil
+        guard opened.count == constructors.count else { return nil }
+        let prefix = opened.map(\.prefix).min() ?? 0
+        var uses = Array(repeating: ParameterOccurrence.absent, count: prefix)
+        for constructor in opened {
+            let parameters = Array(constructor.binders.prefix(prefix))
+            for index in parameters.indices {
+                if case .refused = uses[index] { continue }
+                let parameter = parameters[index]
+                if constructor.arguments.dropFirst(prefix).contains(where: {
+                    $0.freeVariables.contains(parameter)
+                }) {
+                    uses[index] = .refused
+                    continue
+                }
+                for domain in constructor.domains.dropFirst(prefix) {
+                    uses[index] = merge(
+                        uses[index],
+                        scanning(
+                            parameter,
+                            parameters: parameters,
+                            in: domain,
+                            positive: true,
+                            inductiveName: name
+                        )
+                    )
+                }
+            }
+        }
+        return uses.map { use in
+            switch use {
+            case .positive:
+                return .covariant
+            case .negative:
+                return .contravariant
+            case .absent, .refused:
+                return .invariant
+            }
         }
     }
 
@@ -805,13 +834,12 @@ public struct TypeChecker {
         return count
     }
 
-    /// Uniform prefix of one constructor, and how its first parameter occurs.
-    /// `.refused` means both polarities, a non-polar position, or the parameter inside an index.
-    private func inspectConstructor(
+    /// Binders, their domains, the return arguments, and how long a prefix is passed through.
+    private func openConstructor(
         _ constructorType: Term,
         inductiveName: String,
         arity: Int
-    ) -> (prefix: Int, use: ParameterOccurrence)? {
+    ) -> OpenedInductiveConstructor? {
         var used: Set<String> = []
         var binders: [String] = []
         var domains: [Term] = []
@@ -829,28 +857,17 @@ public struct TypeChecker {
             guard case .variable(let name) = arguments[prefix].kind, name == binders[prefix] else { break }
             prefix += 1
         }
-        guard let parameter = binders.first,
-              prefix >= 1,
-              case .variable(let returned) = arguments[0].kind,
-              returned == parameter
-        else { return (prefix, .refused) }
-
-        for index in arguments.dropFirst() where index.freeVariables.contains(parameter) {
-            return (prefix, .refused)
-        }
-        var result = ParameterOccurrence.absent
-        for domain in domains.dropFirst() {
-            result = merge(
-                result,
-                scanning(parameter, in: domain, positive: true, inductiveName: inductiveName)
-            )
-            if case .refused = result { return (prefix, .refused) }
-        }
-        return (prefix, result)
+        return OpenedInductiveConstructor(
+            binders: binders,
+            domains: domains,
+            arguments: arguments,
+            prefix: prefix
+        )
     }
 
     private func scanning(
         _ parameter: String,
+        parameters: [String],
         in term: Term,
         positive: Bool,
         inductiveName: String
@@ -860,12 +877,19 @@ public struct TypeChecker {
             guard name == parameter else { return .absent }
             return positive ? .positive : .negative
         case .pi(let hint, let domain, let body):
-            let domainUse = scanning(parameter, in: domain, positive: !positive, inductiveName: inductiveName)
+            let domainUse = scanning(
+                parameter,
+                parameters: parameters,
+                in: domain,
+                positive: !positive,
+                inductiveName: inductiveName
+            )
             var used = term.freeVariables
             used.insert(parameter)
             let name = freshBinder(hint, used: &used)
             let bodyUse = scanning(
                 parameter,
+                parameters: parameters,
                 in: body.instantiated(with: .variable(name)),
                 positive: positive,
                 inductiveName: inductiveName
@@ -873,12 +897,15 @@ public struct TypeChecker {
             return merge(domainUse, bodyUse)
         case .application:
             let (head, arguments) = InductiveFamily.peelApplicationSpine(term)
+            let passedThrough = arguments.count >= parameters.count
+                && zip(arguments.prefix(parameters.count), parameters).allSatisfy { argument, name in
+                    if case .variable(let variable) = argument.kind { return variable == name }
+                    return false
+                }
             if positive,
                inductiveHead(head, equals: inductiveName),
-               let first = arguments.first,
-               case .variable(let name) = first.kind,
-               name == parameter,
-               arguments.dropFirst().allSatisfy({ !$0.freeVariables.contains(parameter) }) {
+               passedThrough,
+               arguments.dropFirst(parameters.count).allSatisfy({ !$0.freeVariables.contains(parameter) }) {
                 return .absent
             }
             return term.freeVariables.contains(parameter) ? .refused : .absent

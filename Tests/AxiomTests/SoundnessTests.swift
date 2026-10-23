@@ -240,6 +240,160 @@ final class SoundnessTests: XCTestCase {
         }
     }
 
+    // MARK: - Inductive parameter cumulativity
+
+    /// `List : Π(A : Type₂). Type₃`. The parameter domain accepts both universes, and the
+    /// inductive sits strictly above it, so the constructors stay predicative.
+    func testCovariantListParameterIsCumulative() throws {
+        let env = try listEnvironment()
+        let lower = apply("List", .universe(0))
+        let upper = apply("List", .universe(1))
+        var checker = TypeChecker(declarations: env)
+        XCTAssertNoThrow(
+            try checker.checkTermMatchesType(.variable("xs"), expected: upper, environment: ["xs": lower])
+        )
+        assertTypeMismatch(
+            checker: &checker,
+            .variable("xs"),
+            expected: lower,
+            environment: ["xs": upper]
+        )
+        XCTAssertFalse(try Conversion().areDefinitionallyEqual(lower, upper))
+    }
+
+    func testCovariantParameterLiftsWhenTheIndexMatches() throws {
+        var env = try natEnvironment()
+        let parameter = Term.universe(2)
+        let element = Term.variable("A")
+        let index = Term.variable("n")
+        try env.add(Declaration(
+            name: "Vec",
+            kind: .inductive,
+            type: Term.pi(param: "A", type: parameter, body: Term.pi(param: "n", type: nat, body: .universe(3)))
+        ))
+        try env.add(Declaration(
+            name: "vnil",
+            kind: .constructor,
+            type: Term.pi(param: "A", type: parameter, body: apply("Vec", element, .variable("zero")))
+        ))
+        try env.add(Declaration(
+            name: "vcons",
+            kind: .constructor,
+            type: Term.pi(
+                param: "A",
+                type: parameter,
+                body: Term.pi(
+                    param: "n",
+                    type: nat,
+                    body: Term.pi(
+                        param: "h",
+                        type: element,
+                        body: Term.pi(
+                            param: "t",
+                            type: apply("Vec", element, index),
+                            body: apply("Vec", element, apply("succ", index))
+                        )
+                    )
+                )
+            )
+        ))
+        try env.closeInductive("Vec")
+
+        let lower = apply("Vec", .universe(0), .variable("zero"))
+        let upper = apply("Vec", .universe(1), .variable("zero"))
+        let shifted = apply("Vec", .universe(1), apply("succ", .variable("zero")))
+        var checker = TypeChecker(declarations: env)
+        XCTAssertNoThrow(
+            try checker.checkTermMatchesType(.variable("v"), expected: upper, environment: ["v": lower])
+        )
+        assertTypeMismatch(checker: &checker, .variable("v"), expected: shifted, environment: ["v": lower])
+        XCTAssertFalse(try Conversion().areDefinitionallyEqual(lower, upper))
+    }
+
+    func testContravariantParameterLiftsTheOtherWay() throws {
+        let env = try predicateEnvironment()
+        let smaller = apply("Pred", .universe(0))
+        let larger = apply("Pred", .universe(1))
+        var checker = TypeChecker(declarations: env)
+        XCTAssertNoThrow(
+            try checker.checkTermMatchesType(.variable("p"), expected: smaller, environment: ["p": larger])
+        )
+        assertTypeMismatch(checker: &checker, .variable("p"), expected: larger, environment: ["p": smaller])
+        XCTAssertFalse(try Conversion().areDefinitionallyEqual(smaller, larger))
+    }
+
+    func testParameterOccurringBothWaysDoesNotLift() throws {
+        let parameter = Term.universe(2)
+        let element = Term.variable("A")
+        var env = DeclarationEnvironment()
+        try env.add(Declaration(
+            name: "Inv",
+            kind: .inductive,
+            type: Term.pi(param: "A", type: parameter, body: .universe(3))
+        ))
+        try env.add(Declaration(
+            name: "mk",
+            kind: .constructor,
+            type: Term.pi(
+                param: "A",
+                type: parameter,
+                body: Term.pi(
+                    param: "x",
+                    type: element,
+                    body: Term.pi(
+                        param: "f",
+                        type: Term.pi(param: "_", type: element, body: .variable("Nat")),
+                        body: apply("Inv", element)
+                    )
+                )
+            )
+        ))
+        try env.closeInductive("Inv")
+
+        var checker = TypeChecker(declarations: env)
+        assertTypeMismatch(
+            checker: &checker,
+            .variable("v"),
+            expected: apply("Inv", .universe(1)),
+            environment: ["v": apply("Inv", .universe(0))]
+        )
+        assertTypeMismatch(
+            checker: &checker,
+            .variable("v"),
+            expected: apply("Inv", .universe(0)),
+            environment: ["v": apply("Inv", .universe(1))]
+        )
+    }
+
+    func testEachCovariantParameterLiftsOnItsOwn() throws {
+        let env = try pairEnvironment()
+        let same = apply("Pair", .universe(0), .universe(0))
+        var checker = TypeChecker(declarations: env)
+        XCTAssertNoThrow(
+            try checker.checkTermMatchesType(
+                .variable("p"),
+                expected: apply("Pair", .universe(1), .universe(0)),
+                environment: ["p": same]
+            )
+        )
+        XCTAssertNoThrow(
+            try checker.checkTermMatchesType(
+                .variable("p"),
+                expected: apply("Pair", .universe(0), .universe(1)),
+                environment: ["p": same]
+            )
+        )
+        assertTypeMismatch(
+            checker: &checker,
+            .variable("p"),
+            expected: same,
+            environment: ["p": apply("Pair", .universe(1), .universe(0))]
+        )
+        XCTAssertFalse(
+            try Conversion().areDefinitionallyEqual(same, apply("Pair", .universe(1), .universe(1)))
+        )
+    }
+
     func testLetSubstitutesValueAndHasBodyType() throws {
         let env = try natEnvironment()
         let term = Term.localLet(
@@ -1015,5 +1169,115 @@ final class SoundnessTests: XCTestCase {
         try env.add(Declaration(name: "False", kind: .inductive, type: .universe(0)))
         try env.closeInductive("False")
         return env
+    }
+
+    private func apply(_ name: String, _ arguments: Term...) -> Term {
+        arguments.reduce(Term.variable(name)) { Term.application(function: $0, argument: $1) }
+    }
+
+    /// `Π(A : Type₂). Type₃`. Both `Type₀` and `Type₁` are legal arguments, and the inductive
+    /// universe is strictly above the parameter, so quantification stays predicative.
+    private func cumulativeFamilyType() -> Term {
+        Term.pi(param: "A", type: .universe(2), body: .universe(3))
+    }
+
+    private func listEnvironment() throws -> DeclarationEnvironment {
+        let parameter = Term.universe(2)
+        let listed = apply("List", .variable("A"))
+        var env = DeclarationEnvironment()
+        try env.add(Declaration(name: "List", kind: .inductive, type: cumulativeFamilyType()))
+        try env.add(Declaration(
+            name: "nil",
+            kind: .constructor,
+            type: Term.pi(param: "A", type: parameter, body: listed)
+        ))
+        try env.add(Declaration(
+            name: "cons",
+            kind: .constructor,
+            type: Term.pi(
+                param: "A",
+                type: parameter,
+                body: Term.pi(
+                    param: "h",
+                    type: .variable("A"),
+                    body: Term.pi(param: "t", type: listed, body: listed)
+                )
+            )
+        ))
+        try env.closeInductive("List")
+        return env
+    }
+
+    private func predicateEnvironment() throws -> DeclarationEnvironment {
+        let parameter = Term.universe(2)
+        var env = DeclarationEnvironment()
+        try env.add(Declaration(name: "Pred", kind: .inductive, type: cumulativeFamilyType()))
+        try env.add(Declaration(
+            name: "mk",
+            kind: .constructor,
+            type: Term.pi(
+                param: "A",
+                type: parameter,
+                body: Term.pi(
+                    param: "f",
+                    type: Term.pi(param: "_", type: .variable("A"), body: .variable("Nat")),
+                    body: apply("Pred", .variable("A"))
+                )
+            )
+        ))
+        try env.closeInductive("Pred")
+        return env
+    }
+
+    private func pairEnvironment() throws -> DeclarationEnvironment {
+        let parameter = Term.universe(2)
+        var env = DeclarationEnvironment()
+        try env.add(Declaration(
+            name: "Pair",
+            kind: .inductive,
+            type: Term.pi(
+                param: "A",
+                type: parameter,
+                body: Term.pi(param: "B", type: parameter, body: .universe(3))
+            )
+        ))
+        try env.add(Declaration(
+            name: "mk",
+            kind: .constructor,
+            type: Term.pi(
+                param: "A",
+                type: parameter,
+                body: Term.pi(
+                    param: "B",
+                    type: parameter,
+                    body: Term.pi(
+                        param: "x",
+                        type: .variable("A"),
+                        body: Term.pi(
+                            param: "y",
+                            type: .variable("B"),
+                            body: apply("Pair", .variable("A"), .variable("B"))
+                        )
+                    )
+                )
+            )
+        ))
+        try env.closeInductive("Pair")
+        return env
+    }
+
+    private func assertTypeMismatch(
+        checker: inout TypeChecker,
+        _ term: Term,
+        expected: Term,
+        environment: [String: Term]
+    ) {
+        XCTAssertThrowsError(
+            try checker.checkTermMatchesType(term, expected: expected, environment: environment)
+        ) { error in
+            guard case .typeMismatch = error as? TypeError else {
+                return XCTFail("Expected typeMismatch, got \(error)")
+            }
+        }
     }
 }
