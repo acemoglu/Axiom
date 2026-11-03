@@ -65,7 +65,8 @@ enum InductiveFamily {
         case .prop:
             return .prop
         case .universe(let level):
-            return .type(level)
+            guard case .literal(let concrete) = level.normalized() else { return nil }
+            return .type(concrete)
         default:
             return nil
         }

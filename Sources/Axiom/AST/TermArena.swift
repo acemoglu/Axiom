@@ -247,7 +247,7 @@ enum TermKindStorage {
     case variable(String)
     case boundVariable(Int)
     case hole(String)
-    case universe(Int)
+    case universe(UniverseLevel)
     case prop
     case pi(hint: String, type: Int32, body: Int32)
     case abstraction(hint: String, type: Int32, body: Int32)

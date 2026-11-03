@@ -65,7 +65,9 @@ public struct Unifier {
             return
 
         case (.universe(let i), .universe(let j)):
-            guard i == j else { throw UnificationError.unificationMismatch(t1, t2) }
+            guard i.normalized() == j.normalized() else {
+                throw UnificationError.unificationMismatch(t1, t2)
+            }
             return
 
         case (.application(let f1, let a1), .application(let f2, let a2)):

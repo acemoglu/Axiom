@@ -22,7 +22,13 @@ public enum ProximityMetric: Sendable {
             return max(0.35, 0.85 - Double(depth) * 0.05)
 
         case (.universe(let i), .universe(let j)):
-            let distance = abs(i - j)
+            let left = i.normalized()
+            let right = j.normalized()
+            if left == right { return 1.0 }
+            guard case .literal(let a) = left, case .literal(let b) = right else {
+                return 0.0
+            }
+            let distance = abs(a - b)
             return distance == 0 ? 1.0 : max(0, 1.0 - Double(distance) * 0.25)
 
         case (.variable(let a), .variable(let b)):

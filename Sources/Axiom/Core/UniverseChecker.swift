@@ -147,10 +147,10 @@ public struct UniverseChecker {
     }
 
     private func universeLevel(of term: Term) -> Int? {
-        if case .universe(let level) = term.kind {
-            return level
-        }
-        return nil
+        guard case .universe(let level) = term.kind,
+              case .literal(let concrete) = level.normalized()
+        else { return nil }
+        return concrete
     }
 
     private func peelSpine(_ term: Term) -> (head: Term, arguments: [Term]) {

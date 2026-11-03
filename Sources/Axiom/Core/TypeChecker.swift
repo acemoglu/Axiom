@@ -94,6 +94,9 @@ public struct TypeChecker {
     public let conversion: Conversion
     public var reductionBudget = ReductionBudget()
 
+    /// Assumed universe-level inequalities. Level variables only lift under these.
+    public var universeConstraints = UniverseConstraints()
+
     /// Per-checker memo of WHNF results — keyed by ``Term/internID``. Cleared implicitly
     /// when the checker is dropped; avoids re-normalizing the same type (e.g. `Type₁`
     /// domains) hundreds of times along a deep application spine.
@@ -172,7 +175,7 @@ public struct TypeChecker {
             return .universe(1)
 
         case .universe(let level):
-            return .universe(level + 1)
+            return .universe(level.successor)
 
         case .pi(let param, let domain, let rawCodomain):
             var usedNames = Set(environment.keys)
@@ -191,7 +194,7 @@ public struct TypeChecker {
                 return .universe(j)
             }
             let i = try expectUniverseLevel(of: domain, inferredType: domainType)
-            return .universe(max(i, j))
+            return .universe(UniverseLevel.join(i, j))
 
         case .abstraction(let param, let paramType, let rawBody):
             if expectedType == nil {
@@ -698,7 +701,7 @@ public struct TypeChecker {
         }
     }
 
-    /// `Typeᵢ ≤ Typeⱼ` for `i ≤ j`, lifted through Π.
+    /// `Type_ℓ ≤ Type_κ` when the level constraint set proves `ℓ ≤ κ`, lifted through Π.
     /// Domains are contravariant and codomains are covariant.
     /// Each parameter of a closed inductive lifts on its own. Positive gives `List A ≤ List B`
     /// and `Pair A B ≤ Pair A' B'`. Negative gives `Pred B ≤ Pred A`. Indices, and a parameter
@@ -709,7 +712,7 @@ public struct TypeChecker {
         if lower == upper { return true }
         if conversion.areDefinitionallyEqualAssumingNormalized(lower, upper) { return true }
         if case .universe(let i) = lower.kind, case .universe(let j) = upper.kind {
-            return i <= j
+            return universeConstraints.lessOrEqual(i, j)
         }
         if case .pi(_, let domain, let body) = lower.kind,
            case .pi(_, let expectedDomain, let expectedBody) = upper.kind {
@@ -1021,11 +1024,16 @@ public struct TypeChecker {
         }
     }
 
-    private func expectUniverseLevel(of term: Term, inferredType: Term) throws -> Int {
+    private func expectUniverseLevel(of term: Term, inferredType: Term) throws -> UniverseLevel {
         guard case .universe(let level) = inferredType.kind else {
             throw TypeError.expectedUniverse(term, inferredType)
         }
         return level
+    }
+
+    /// Record `lower ≤ upper` for later cumulativity checks.
+    public mutating func assumeLevel(_ lower: UniverseLevel, lessOrEqual upper: UniverseLevel) {
+        universeConstraints.assumeLessOrEqual(lower, upper)
     }
 
     /// A Π or λ domain is a type when it inhabits `Typeᵢ` or `Prop`.

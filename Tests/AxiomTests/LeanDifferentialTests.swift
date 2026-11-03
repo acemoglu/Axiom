@@ -104,7 +104,8 @@ final class LeanDifferentialTests: XCTestCase {
     private func jsonEncode(_ term: Term) -> String? {
         switch term.kind {
         case .universe(let level):
-            return "[\"U\",\(level)]"
+            guard case .literal(let concrete) = level.normalized() else { return nil }
+            return "[\"U\",\(concrete)]"
         case .boundVariable(let index):
             return "[\"B\",\(index)]"
         case .pi(_, let type, let body):

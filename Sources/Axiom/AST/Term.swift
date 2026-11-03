@@ -124,8 +124,8 @@ public struct Term: Equatable, Hashable, Sendable {
         /// *σ(m) = t* when unification succeeds.
         case hole(String)
 
-        /// *Type_i* — predicative universe.
-        case universe(Int)
+        /// *Type_ℓ* — predicative universe at level ``UniverseLevel``.
+        case universe(UniverseLevel)
 
         /// *Prop*, the sort of propositions. Its type is *Type₁*.
         case prop
@@ -188,7 +188,11 @@ extension Term {
     }
 
     public static func universe(_ level: Int) -> Term {
-        TermPool.shared.intern(.universe(level))
+        universe(.literal(level))
+    }
+
+    public static func universe(_ level: UniverseLevel) -> Term {
+        TermPool.shared.intern(.universe(level.normalized()))
     }
 
     /// *Prop*. Its type is *Type₁*.
