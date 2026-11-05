@@ -44,7 +44,7 @@ public enum TypeError: Error, Equatable, Sendable {
     /// An unclosed inductive is mentioned by this block and was left out of it.
     case incompleteMutualBlock(missing: String, referencedBy: String)
 
-    case impredicativeQuantification(inductive: String, universeLevel: Int, occurrence: Term)
+    case impredicativeQuantification(inductive: String, universeLevel: UniverseLevel, occurrence: Term)
 
     case invalidInductiveSort(String, Term)
 
@@ -1060,10 +1060,19 @@ public struct TypeChecker {
                 actual: levels.count
             )
         }
-        let substituted = declaration.type.substitutingLevels(levelSubstitution(
+        var substituted = declaration.type.substitutingLevels(levelSubstitution(
             parameters: declaration.levelParameters,
             levels: levels
         ))
+        if declaration.kind == .constructor,
+           let parent = inductiveName(inConstructorType: declaration.type),
+           !levels.isEmpty
+        {
+            substituted = substituted.substituting(
+                name: parent,
+                with: .constant(parent, levels: levels)
+            )
+        }
         return instantiateHoles(in: substituted)
     }
 
@@ -1200,11 +1209,13 @@ public struct TypeChecker {
             return
         }
         let level = try inductiveLevel(for: inductiveName)
+        let skip = declarations.lookup(inductiveName).map { InductiveFamily.telescopeLength($0.type) } ?? 0
         do {
             try UniverseChecker().checkConstructorType(
                 constructorType,
                 inductiveName: inductiveName,
-                inductiveLevel: level
+                inductiveLevel: level,
+                skipLeadingDomains: skip
             )
         } catch let UniversePolicyError.impredicativeQuantification(inductive, universeLevel, occurrence) {
             throw TypeError.impredicativeQuantification(
@@ -1255,7 +1266,7 @@ public struct TypeChecker {
         }
     }
 
-    private func inductiveLevel(for inductiveName: String) throws -> Int {
+    private func inductiveLevel(for inductiveName: String) throws -> UniverseLevel {
         guard case .type(let level) = try inductiveSort(for: inductiveName) else {
             let sort = declarations.lookup(inductiveName)?.type ?? .prop
             throw TypeError.invalidInductiveSort(inductiveName, sort)
@@ -1277,12 +1288,14 @@ public struct TypeChecker {
             throw TypeError.unresolvedPositivityHole(hole, inductive: inductive, occurrence: occurrence)
         }
         if case .type(let level) = try inductiveSort(for: inductiveName) {
+            let skip = declarations.lookup(inductiveName).map { InductiveFamily.telescopeLength($0.type) } ?? 0
             for constructorType in constructorTypes {
                 do {
                     try UniverseChecker().checkConstructorType(
                         constructorType,
                         inductiveName: inductiveName,
-                        inductiveLevel: level
+                        inductiveLevel: level,
+                        skipLeadingDomains: skip
                     )
                 } catch let UniversePolicyError.impredicativeQuantification(inductive, universeLevel, occurrence) {
                     throw TypeError.impredicativeQuantification(

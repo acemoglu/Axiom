@@ -49,11 +49,11 @@ enum InductiveFamily {
     }
 
     enum FamilySort: Equatable {
-        case type(Int)
+        case type(UniverseLevel)
         case prop
     }
 
-    /// *Π(_:A). … Type_i* or *Π(_:A). … Prop* — an indexed family sort.
+    /// *Π(_:A). … Type_ℓ* or *Π(_:A). … Prop* — an indexed family sort.
     static func isIndexedFamilyType(_ type: Term) -> Bool {
         guard case .pi = type.kind else { return false }
         return familySort(type) != nil
@@ -65,16 +65,26 @@ enum InductiveFamily {
         case .prop:
             return .prop
         case .universe(let level):
-            guard case .literal(let concrete) = level.normalized() else { return nil }
-            return .type(concrete)
+            return .type(level.normalized())
         default:
             return nil
         }
     }
 
     /// Universe level of the family result after peeling dependent binders.
-    static func familyUniverseLevel(_ type: Term) -> Int? {
+    static func familyUniverseLevel(_ type: Term) -> UniverseLevel? {
         guard case .type(let level) = familySort(type) else { return nil }
         return level
+    }
+
+    /// Number of Π binders before the family sort — parameters and indices.
+    static func telescopeLength(_ type: Term) -> Int {
+        var count = 0
+        var current = type
+        while case .pi(_, _, let body) = current.kind {
+            count += 1
+            current = body
+        }
+        return count
     }
 }

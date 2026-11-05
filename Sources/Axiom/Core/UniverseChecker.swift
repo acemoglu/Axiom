@@ -1,35 +1,41 @@
 /// Predicative universe policy for inductive constructor types.
 ///
-/// An inductive declared in ``Term/universe`` *i* cannot quantify over the same
-/// universe in a constructor argument (impredicative `Type_i` polymorphism).
+/// An inductive declared in ``Term/universe`` *ℓ* cannot quantify over the same
+/// universe in a non-parameter constructor argument (impredicative `Type_ℓ` polymorphism).
+/// Leading domains that repeat the inductive telescope (parameters and indices) are skipped.
 public enum UniversePolicyError: Error, Equatable, Sendable {
-    case impredicativeQuantification(inductive: String, universeLevel: Int, in: Term)
+    case impredicativeQuantification(inductive: String, universeLevel: UniverseLevel, in: Term)
 }
 
 public struct UniverseChecker {
     public init() {}
 
-    /// Rejects constructor types that quantify over ``Term/universe`` *i* when the parent
-    /// inductive also lives in ``Term/universe`` *i*.
+    /// Rejects constructor field types that quantify over the inductive's own universe.
     public func checkConstructorType(
         _ type: Term,
         inductiveName: String,
-        inductiveLevel: Int
+        inductiveLevel: UniverseLevel,
+        skipLeadingDomains: Int = 0
     ) throws {
+        let normalizedLevel = inductiveLevel.normalized()
         var current = type
+        var skipped = 0
         while case .pi(_, let domain, let body) = current.kind {
-            if universeLevel(of: domain) == inductiveLevel {
+            if skipped >= skipLeadingDomains,
+               universeLevel(of: domain) == normalizedLevel
+            {
                 throw UniversePolicyError.impredicativeQuantification(
                     inductive: inductiveName,
-                    universeLevel: inductiveLevel,
+                    universeLevel: normalizedLevel,
                     in: domain
                 )
             }
             try checkNoImpredicativeQuantification(
                 domain,
                 inductiveName: inductiveName,
-                inductiveLevel: inductiveLevel
+                inductiveLevel: normalizedLevel
             )
+            skipped += 1
             current = body
         }
         let (_, arguments) = peelSpine(current)
@@ -37,7 +43,7 @@ public struct UniverseChecker {
             try checkNoImpredicativeQuantification(
                 argument,
                 inductiveName: inductiveName,
-                inductiveLevel: inductiveLevel
+                inductiveLevel: normalizedLevel
             )
         }
     }
@@ -45,7 +51,7 @@ public struct UniverseChecker {
     private func checkNoImpredicativeQuantification(
         _ type: Term,
         inductiveName: String,
-        inductiveLevel: Int
+        inductiveLevel: UniverseLevel
     ) throws {
         switch type.kind {
         case .pi(_, let domain, let body):
@@ -146,11 +152,9 @@ public struct UniverseChecker {
         }
     }
 
-    private func universeLevel(of term: Term) -> Int? {
-        guard case .universe(let level) = term.kind,
-              case .literal(let concrete) = level.normalized()
-        else { return nil }
-        return concrete
+    private func universeLevel(of term: Term) -> UniverseLevel? {
+        guard case .universe(let level) = term.kind else { return nil }
+        return level.normalized()
     }
 
     private func peelSpine(_ term: Term) -> (head: Term, arguments: [Term]) {

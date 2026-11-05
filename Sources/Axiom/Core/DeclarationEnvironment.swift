@@ -149,10 +149,12 @@ public struct DeclarationEnvironment: Equatable, Sendable {
             constructorTypes: [constructorType]
         )
         if case .type(let inductiveLevel) = sort {
+            let skip = declarationsByName[inductiveName].map { InductiveFamily.telescopeLength($0.type) } ?? 0
             try UniverseChecker().checkConstructorType(
                 constructorType,
                 inductiveName: inductiveName,
-                inductiveLevel: inductiveLevel
+                inductiveLevel: inductiveLevel,
+                skipLeadingDomains: skip
             )
         }
     }
@@ -273,11 +275,13 @@ public struct DeclarationEnvironment: Equatable, Sendable {
                 )
             }
             guard case .type(let inductiveLevel) = sort else { continue }
+            let skip = declarationsByName[inductiveName].map { InductiveFamily.telescopeLength($0.type) } ?? 0
             for constructorType in constructors(for: inductiveName).map(\.type) {
                 try UniverseChecker().checkConstructorType(
                     constructorType,
                     inductiveName: inductiveName,
-                    inductiveLevel: inductiveLevel
+                    inductiveLevel: inductiveLevel,
+                    skipLeadingDomains: skip
                 )
             }
         }

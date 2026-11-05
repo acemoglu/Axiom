@@ -26,7 +26,7 @@ final class UniversePolicyTests: XCTestCase {
                 return XCTFail("Expected impredicativeQuantification, got \(error)")
             }
             XCTAssertEqual(inductive, "Box")
-            XCTAssertEqual(level, 0)
+            XCTAssertEqual(level, .literal(0))
         }
     }
 
@@ -84,7 +84,7 @@ final class UniversePolicyTests: XCTestCase {
                 return XCTFail("Expected impredicativeQuantification, got \(error)")
             }
             XCTAssertEqual(inductive, "Box")
-            XCTAssertEqual(level, 0)
+            XCTAssertEqual(level, .literal(0))
         }
     }
 }
