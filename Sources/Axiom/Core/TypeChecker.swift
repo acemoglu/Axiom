@@ -59,6 +59,9 @@ public enum TypeError: Error, Equatable, Sendable {
 
     /// Normalization exceeded the reduction fuel budget while checking this term.
     case reductionOutOfBounds(Term)
+
+    /// A polymorphic declaration was applied to the wrong number of universe arguments.
+    case universeArgumentMismatch(name: String, expected: Int, actual: Int)
 }
 
 /// Where the single parameter of an inductive occurs in a constructor.
@@ -152,10 +155,19 @@ public struct TypeChecker {
                 return instantiateHoles(in: localType)
             }
             if let declaration = declarations.lookup(name) {
-                return instantiateHoles(in: declaration.type)
+                return try typeOfDeclaration(declaration, levels: identityLevels(for: declaration))
             }
             if let declaration = declarations.lookup(resolvingQualifiedName: name) {
-                return instantiateHoles(in: declaration.type)
+                return try typeOfDeclaration(declaration, levels: identityLevels(for: declaration))
+            }
+            throw TypeError.unboundVariable(name)
+
+        case .constant(let name, let levels):
+            if let declaration = declarations.lookup(name) {
+                return try typeOfDeclaration(declaration, levels: levels)
+            }
+            if let declaration = declarations.lookup(resolvingQualifiedName: name) {
+                return try typeOfDeclaration(declaration, levels: levels)
             }
             throw TypeError.unboundVariable(name)
 
@@ -484,7 +496,7 @@ public struct TypeChecker {
             defer { visited.remove(name) }
             return instantiateHoles(in: solution, visited: &visited)
 
-        case .variable, .boundVariable, .universe, .prop:
+        case .variable, .constant, .boundVariable, .universe, .prop:
             return term
 
         case .pi(let hint, let type, let body):
@@ -573,7 +585,7 @@ public struct TypeChecker {
             let relative = index - offset
             guard relative >= 0, relative < binderCount else { return term }
             return .variable(hints[binderCount - 1 - relative])
-        case .variable, .hole, .universe, .prop:
+        case .variable, .constant, .hole, .universe, .prop:
             return term
         case .application(let function, let argument):
             return .application(
@@ -989,7 +1001,7 @@ public struct TypeChecker {
     }
 
     private mutating func normalizeForChecking(_ term: Term) throws -> Term {
-        let withHoles = instantiateHoles(in: term)
+        let withHoles = expandPolymorphicConstants(in: instantiateHoles(in: term))
         if let cached = normalizationCache[withHoles.internID] {
             return cached
         }
@@ -1007,7 +1019,7 @@ public struct TypeChecker {
     }
 
     private mutating func normalizedForComparison(_ term: Term) throws -> Term {
-        let withHoles = instantiateHoles(in: term)
+        let withHoles = expandPolymorphicConstants(in: instantiateHoles(in: term))
         if let cached = comparisonNormalizationCache[withHoles.internID] {
             return cached
         }
@@ -1034,6 +1046,94 @@ public struct TypeChecker {
     /// Record `lower ≤ upper` for later cumulativity checks.
     public mutating func assumeLevel(_ lower: UniverseLevel, lessOrEqual upper: UniverseLevel) {
         universeConstraints.assumeLessOrEqual(lower, upper)
+    }
+
+    private func identityLevels(for declaration: Declaration) -> [UniverseLevel] {
+        declaration.levelParameters.map { .variable($0) }
+    }
+
+    private func typeOfDeclaration(_ declaration: Declaration, levels: [UniverseLevel]) throws -> Term {
+        guard levels.count == declaration.levelParameters.count else {
+            throw TypeError.universeArgumentMismatch(
+                name: declaration.name,
+                expected: declaration.levelParameters.count,
+                actual: levels.count
+            )
+        }
+        let substituted = declaration.type.substitutingLevels(levelSubstitution(
+            parameters: declaration.levelParameters,
+            levels: levels
+        ))
+        return instantiateHoles(in: substituted)
+    }
+
+    private func levelSubstitution(
+        parameters: [String],
+        levels: [UniverseLevel]
+    ) -> [String: UniverseLevel] {
+        Dictionary(uniqueKeysWithValues: zip(parameters, levels))
+    }
+
+    /// Replace valued polymorphic constants with their level-substituted bodies.
+    private func expandPolymorphicConstants(in term: Term) -> Term {
+        switch term.kind {
+        case .constant(let name, let levels):
+            if let declaration = declarations.lookup(name)
+                ?? declarations.lookup(resolvingQualifiedName: name),
+               let value = declaration.value,
+               declaration.kind == .definition
+                || declaration.kind == .theorem
+                || declaration.kind == .constant,
+               levels.count == declaration.levelParameters.count
+            {
+                let substituted = value.substitutingLevels(levelSubstitution(
+                    parameters: declaration.levelParameters,
+                    levels: levels
+                ))
+                return expandPolymorphicConstants(in: substituted)
+            }
+            return term
+        case .variable, .boundVariable, .hole, .universe, .prop:
+            return term
+        case .application(let function, let argument):
+            return .application(
+                function: expandPolymorphicConstants(in: function),
+                argument: expandPolymorphicConstants(in: argument)
+            )
+        case .pi(let hint, let type, let body):
+            return .rawPi(
+                hint: hint,
+                type: expandPolymorphicConstants(in: type),
+                body: expandPolymorphicConstants(in: body)
+            )
+        case .abstraction(let hint, let type, let body):
+            return .rawAbstraction(
+                hint: hint,
+                type: expandPolymorphicConstants(in: type),
+                body: expandPolymorphicConstants(in: body)
+            )
+        case .localLet(let hint, let type, let value, let body):
+            return .rawLocalLet(
+                hint: hint,
+                type: expandPolymorphicConstants(in: type),
+                value: expandPolymorphicConstants(in: value),
+                body: expandPolymorphicConstants(in: body)
+            )
+        case .inductive(let name, let type):
+            return .inductive(name: name, type: expandPolymorphicConstants(in: type))
+        case .constructor(let name, let inductiveName, let type):
+            return .constructor(
+                name: name,
+                inductiveName: inductiveName,
+                type: expandPolymorphicConstants(in: type)
+            )
+        case .match(let scrutinee, let motive, let cases):
+            return .match(
+                scrutinee: expandPolymorphicConstants(in: scrutinee),
+                motive: expandPolymorphicConstants(in: motive),
+                cases: cases.mapValues { expandPolymorphicConstants(in: $0) }
+            )
+        }
     }
 
     /// A Π or λ domain is a type when it inhabits `Typeᵢ` or `Prop`.
@@ -1283,7 +1383,7 @@ public struct TypeChecker {
         switch term.kind {
         case .hole(let name):
             return [name]
-        case .variable, .boundVariable, .universe, .prop:
+        case .variable, .constant, .boundVariable, .universe, .prop:
             return []
         case .application(let function, let argument):
             return unresolvedTermHoles(in: function).union(unresolvedTermHoles(in: argument))

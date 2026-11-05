@@ -1,9 +1,8 @@
 /// A predicative universe level: a concrete index, a level variable, or a
 /// combination built with `succ` and `max`.
 ///
-/// Declarations are still monomorphic. Level variables appear in terms and are
-/// compared under an explicit ``UniverseConstraints`` set — they are not yet
-/// parameters of definitions or inductives.
+/// Level variables may be parameters of polymorphic declarations. Free level
+/// variables in a term are also compared under ``UniverseConstraints``.
 public indirect enum UniverseLevel: Hashable, Sendable {
     case literal(Int)
     case variable(String)
@@ -52,6 +51,23 @@ public indirect enum UniverseLevel: Hashable, Sendable {
 
     private static func canonicalOrder(_ left: UniverseLevel, before right: UniverseLevel) -> Bool {
         String(describing: left) < String(describing: right)
+    }
+
+    /// Replaces level variables that appear as keys of `substitution`.
+    public func substituting(_ substitution: [String: UniverseLevel]) -> UniverseLevel {
+        switch self {
+        case .literal:
+            return self
+        case .variable(let name):
+            return substitution[name]?.normalized() ?? self
+        case .succ(let inner):
+            return UniverseLevel.succ(inner.substituting(substitution)).normalized()
+        case .max(let left, let right):
+            return UniverseLevel.join(
+                left.substituting(substitution),
+                right.substituting(substitution)
+            )
+        }
     }
 }
 

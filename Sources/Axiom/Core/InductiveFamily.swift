@@ -39,7 +39,7 @@ enum InductiveFamily {
 
     static func eliminationHeadName(_ head: Term) -> String? {
         switch head.kind {
-        case .inductive(let name, _), .variable(let name):
+        case .inductive(let name, _), .variable(let name), .constant(let name, _):
             return name
         case .constructor(_, let inductiveName, _):
             return inductiveName

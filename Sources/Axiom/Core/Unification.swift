@@ -70,6 +70,15 @@ public struct Unifier {
             }
             return
 
+        case (.constant(let n1, let l1), .constant(let n2, let l2)):
+            guard n1 == n2,
+                  zip(l1, l2).allSatisfy({ $0.normalized() == $1.normalized() }),
+                  l1.count == l2.count
+            else {
+                throw UnificationError.unificationMismatch(t1, t2)
+            }
+            return
+
         case (.application(let f1, let a1), .application(let f2, let a2)):
             try unifyNormalized(f1, f2, conversion: conversion, unfolding: unfolding, context: &context)
             try unifyNormalized(a1, a2, conversion: conversion, unfolding: unfolding, context: &context)
@@ -163,7 +172,7 @@ public struct Unifier {
             defer { visited.remove(meta) }
             return applyMetas(solution, context: context, visited: &visited)
 
-        case .variable, .boundVariable, .universe, .prop:
+        case .variable, .constant, .boundVariable, .universe, .prop:
             return term
 
         case .pi(let hint, let type, let body):

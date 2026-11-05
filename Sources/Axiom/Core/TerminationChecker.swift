@@ -162,7 +162,7 @@ public struct TerminationChecker {
             collectCalleeNames(in: body, among: names, into: &callees)
         case .inductive(_, let type), .constructor(_, _, let type):
             collectCalleeNames(in: type, among: names, into: &callees)
-        case .hole, .universe, .variable, .boundVariable, .prop:
+        case .hole, .universe, .variable, .constant, .boundVariable, .prop:
             break
         }
     }
@@ -256,7 +256,7 @@ public struct TerminationChecker {
 
     private func containsCall(to targets: Set<String>, in term: Term) -> Bool {
         switch term.kind {
-        case .variable(let variableName):
+        case .variable(let variableName), .constant(let variableName, _):
             return targets.contains(variableName)
         case .application(let function, let argument):
             return containsCall(to: targets, in: function) || containsCall(to: targets, in: argument)
@@ -280,7 +280,7 @@ public struct TerminationChecker {
 
     private func containsBareRecursiveReference(in term: Term, targets: Set<String>) -> Bool {
         switch term.kind {
-        case .variable(let variableName):
+        case .variable(let variableName), .constant(let variableName, _):
             return targets.contains(variableName)
         case .application(let function, let argument):
             if isRecursiveCallHead(function, targets: targets) {
@@ -311,11 +311,17 @@ public struct TerminationChecker {
         if case .variable(let variableName) = function.kind {
             return targets.contains(variableName)
         }
+        if case .constant(let variableName, _) = function.kind {
+            return targets.contains(variableName)
+        }
         var current = function
         while case .application(let head, _) = current.kind {
             current = head
         }
         if case .variable(let variableName) = current.kind {
+            return targets.contains(variableName)
+        }
+        if case .constant(let variableName, _) = current.kind {
             return targets.contains(variableName)
         }
         return false
@@ -361,7 +367,7 @@ public struct TerminationChecker {
             for branch in cases.values {
                 collectCallSites(branch, targets: targets, into: &sites)
             }
-        case .hole, .universe, .variable, .boundVariable, .inductive, .constructor, .prop:
+        case .hole, .universe, .variable, .constant, .boundVariable, .inductive, .constructor, .prop:
             break
         }
     }

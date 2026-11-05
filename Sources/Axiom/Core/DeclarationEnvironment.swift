@@ -22,19 +22,23 @@ public struct Declaration: Equatable, Sendable {
     public let type: Term
     public let value: Term?
     public let modulePath: [String]
+    /// Universe parameters `{u v …}` abstracted over `type` and `value`.
+    public let levelParameters: [String]
 
     public init(
         name: String,
         kind: DeclarationKind,
         type: Term,
         value: Term? = nil,
-        modulePath: [String] = []
+        modulePath: [String] = [],
+        levelParameters: [String] = []
     ) {
         self.name = name
         self.kind = kind
         self.type = type
         self.value = value
         self.modulePath = modulePath
+        self.levelParameters = levelParameters
     }
 
     public var qualifiedName: String {
@@ -366,7 +370,7 @@ public struct DeclarationEnvironment: Equatable, Sendable {
         found: inout Set<String>
     ) {
         switch term.kind {
-        case .variable(let name):
+        case .variable(let name), .constant(let name, _):
             if let declaration = declaration(named: name), isEliminableFamily(declaration) {
                 found.insert(declaration.name)
                 return

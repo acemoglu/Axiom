@@ -124,6 +124,12 @@ public struct Term: Equatable, Hashable, Sendable {
         /// *σ(m) = t* when unification succeeds.
         case hole(String)
 
+        /// A top-level declaration applied to explicit universe arguments.
+        /// Monomorphic declarations use an empty `levels` list; `.variable(name)` still
+        /// resolves them. Polymorphic declarations must be referenced this way at a
+        /// concrete (or schematic) level assignment.
+        case constant(name: String, levels: [UniverseLevel])
+
         /// *Type_ℓ* — predicative universe at level ``UniverseLevel``.
         case universe(UniverseLevel)
 
@@ -193,6 +199,13 @@ extension Term {
 
     public static func universe(_ level: UniverseLevel) -> Term {
         TermPool.shared.intern(.universe(level.normalized()))
+    }
+
+    public static func constant(_ name: String, levels: [UniverseLevel] = []) -> Term {
+        TermPool.shared.intern(.constant(
+            name: name,
+            levels: levels.map { $0.normalized() }
+        ))
     }
 
     /// *Prop*. Its type is *Type₁*.
@@ -320,7 +333,7 @@ extension Term {
         switch TermArena.shared.storage(for: internID) {
         case .boundVariable(let index):
             return index >= cutoff ? .rawBoundVariable(index + amount) : self
-        case .variable, .hole, .universe, .prop:
+        case .variable, .constant, .hole, .universe, .prop:
             return self
         case .application(let function, let argument):
             return TermArena.shared.intern(TermKindStorage.application(
@@ -375,7 +388,7 @@ extension Term {
         switch kind {
         case .variable(let variableName):
             return variableName == name ? .rawBoundVariable(depth) : self
-        case .boundVariable, .hole, .universe, .prop:
+        case .constant, .boundVariable, .hole, .universe, .prop:
             return self
         case .application(let function, let argument):
             return .application(
@@ -430,7 +443,7 @@ extension Term {
         case .boundVariable(let index):
             if index == target { return replacement.shifted(by: target) }
             return index > target ? .rawBoundVariable(index - 1) : self
-        case .variable, .hole, .universe, .prop:
+        case .variable, .constant, .hole, .universe, .prop:
             return self
         case .application(let function, let argument):
             return TermArena.shared.intern(TermKindStorage.application(
@@ -493,7 +506,7 @@ extension Term {
         switch kind {
         case .boundVariable(let bound):
             return bound == index
-        case .variable, .hole, .universe, .prop:
+        case .variable, .constant, .hole, .universe, .prop:
             return false
         case .application(let function, let argument):
             return function.mentionsBoundVariable(index) || argument.mentionsBoundVariable(index)
@@ -542,7 +555,10 @@ extension Term {
         case .variable(let variableName):
             return variableName == name ? replacement : self
 
-        case .boundVariable, .hole, .universe, .prop:
+        case .constant(let constantName, _):
+            return constantName == name ? replacement : self
+
+        case .constant, .boundVariable, .hole, .universe, .prop:
             return self
 
         case .application(let function, let argument):
@@ -595,6 +611,58 @@ extension Term {
         }
     }
 
+    /// Applies a universe-level substitution under every ``Kind/universe`` and
+    /// ``Kind/constant`` node.
+    public func substitutingLevels(_ substitution: [String: UniverseLevel]) -> Term {
+        guard !substitution.isEmpty else { return self }
+        switch kind {
+        case .variable, .boundVariable, .hole, .prop:
+            return self
+        case .universe(let level):
+            return .universe(level.substituting(substitution))
+        case .constant(let name, let levels):
+            return .constant(name, levels: levels.map { $0.substituting(substitution) })
+        case .application(let function, let argument):
+            return .application(
+                function: function.substitutingLevels(substitution),
+                argument: argument.substitutingLevels(substitution)
+            )
+        case .pi(let hint, let type, let body):
+            return .rawPi(
+                hint: hint,
+                type: type.substitutingLevels(substitution),
+                body: body.substitutingLevels(substitution)
+            )
+        case .abstraction(let hint, let type, let body):
+            return .rawAbstraction(
+                hint: hint,
+                type: type.substitutingLevels(substitution),
+                body: body.substitutingLevels(substitution)
+            )
+        case .localLet(let hint, let type, let value, let body):
+            return .rawLocalLet(
+                hint: hint,
+                type: type.substitutingLevels(substitution),
+                value: value.substitutingLevels(substitution),
+                body: body.substitutingLevels(substitution)
+            )
+        case .inductive(let name, let type):
+            return .inductive(name: name, type: type.substitutingLevels(substitution))
+        case .constructor(let name, let inductiveName, let type):
+            return .constructor(
+                name: name,
+                inductiveName: inductiveName,
+                type: type.substitutingLevels(substitution)
+            )
+        case .match(let scrutinee, let motive, let cases):
+            return .match(
+                scrutinee: scrutinee.substitutingLevels(substitution),
+                motive: motive.substitutingLevels(substitution),
+                cases: cases.mapValues { $0.substitutingLevels(substitution) }
+            )
+        }
+    }
+
     /// Generates a display name outside user syntax (`#0`, `#1`, …).
     static func freshName(avoiding used: Set<String>) -> String {
         var index = 0
@@ -616,7 +684,7 @@ extension Term {
             return try value.reduced(budget: &budget, unfolding: unfolding)
         }
         switch kind {
-        case .variable, .universe, .hole, .boundVariable, .prop:
+        case .variable, .constant, .universe, .hole, .boundVariable, .prop:
             return self
 
         case .pi(let hint, let type, let body):

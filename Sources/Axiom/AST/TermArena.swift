@@ -96,9 +96,9 @@ final class TermArena: @unchecked Sendable {
 
     private func computeFreeVariables(_ kind: TermKindStorage) -> Set<String> {
         switch kind {
-        case .variable(let name):
+        case .variable(let name), .constant(let name, _):
             return [name]
-        case .boundVariable, .hole, .universe, .prop:
+        case .constant, .boundVariable, .hole, .universe, .prop:
             return []
         case .pi(_, let type, let body), .abstraction(_, let type, let body):
             return storage[Int(type)].freeVariables.union(storage[Int(body)].freeVariables)
@@ -125,7 +125,7 @@ final class TermArena: @unchecked Sendable {
         switch kind {
         case .hole(let name):
             return [name]
-        case .variable, .boundVariable, .universe, .prop:
+        case .variable, .constant, .boundVariable, .universe, .prop:
             return []
         case .pi(_, let type, let body), .abstraction(_, let type, let body):
             return storage[Int(type)].freeMetavariables.union(storage[Int(body)].freeMetavariables)
@@ -150,7 +150,7 @@ final class TermArena: @unchecked Sendable {
 
     private func computeContainsMatch(_ kind: TermKindStorage) -> Bool {
         switch kind {
-        case .variable, .boundVariable, .hole, .universe, .prop:
+        case .variable, .constant, .boundVariable, .hole, .universe, .prop:
             return false
         case .pi(_, let type, let body), .abstraction(_, let type, let body):
             return storage[Int(type)].containsMatch || storage[Int(body)].containsMatch
@@ -173,7 +173,7 @@ final class TermArena: @unchecked Sendable {
         switch kind {
         case .boundVariable:
             return true
-        case .variable, .hole, .universe, .prop:
+        case .variable, .constant, .hole, .universe, .prop:
             return false
         case .pi(_, let type, let body), .abstraction(_, let type, let body):
             return storage[Int(type)].hasBoundVariables || storage[Int(body)].hasBoundVariables
@@ -198,7 +198,7 @@ final class TermArena: @unchecked Sendable {
         switch kind {
         case .boundVariable(let index):
             return index
-        case .variable, .hole, .universe, .prop:
+        case .variable, .constant, .hole, .universe, .prop:
             return -1
         case .pi(_, let type, let body), .abstraction(_, let type, let body):
             let inType = storage[Int(type)].maxBoundIndex
@@ -247,6 +247,7 @@ enum TermKindStorage {
     case variable(String)
     case boundVariable(Int)
     case hole(String)
+    case constant(name: String, levels: [UniverseLevel])
     case universe(UniverseLevel)
     case prop
     case pi(hint: String, type: Int32, body: Int32)
@@ -265,6 +266,8 @@ enum TermKindStorage {
             self = .boundVariable(index)
         case .hole(let name):
             self = .hole(name)
+        case .constant(let name, let levels):
+            self = .constant(name: name, levels: levels)
         case .universe(let level):
             self = .universe(level)
         case .prop:
@@ -303,6 +306,8 @@ enum TermKindStorage {
             return .boundVariable(index)
         case .hole(let name):
             return .hole(name)
+        case .constant(let name, let levels):
+            return .constant(name: name, levels: levels)
         case .universe(let level):
             return .universe(level)
         case .prop:
@@ -361,6 +366,8 @@ extension TermKindStorage {
             return l == r
         case (.hole(let l), .hole(let r)):
             return l == r
+        case (.constant(let ln, let ll), .constant(let rn, let rl)):
+            return ln == rn && ll == rl
         case (.universe(let l), .universe(let r)):
             return l == r
         case (.prop, .prop):
@@ -399,6 +406,12 @@ extension TermKindStorage {
         case .hole(let name):
             hasher.combine(1)
             hasher.combine(name)
+        case .constant(let name, let levels):
+            hasher.combine(12)
+            hasher.combine(name)
+            for level in levels {
+                hasher.combine(level)
+            }
         case .universe(let level):
             hasher.combine(2)
             hasher.combine(level)
